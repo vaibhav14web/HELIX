@@ -1,0 +1,24 @@
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pydantic>=2.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+psutil>=5.9.0
+aiofiles>=23.0.0
+httpx>=0.27.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9
+
+# LLM backends (install as needed):
+# pip install llama-cpp-python           # llama.cpp backend
+# pip install transformers torch         # transformers backend
+
+# Voice
+piper-tts>=1.4.0
+sounddevice>=0.5.0
+soundfile>=0.14.0
+numpy>=2.0.0
+faster-whisper>=1.0.0
+websockets>=12.0
+
