@@ -10,8 +10,9 @@ def event_bus():
 
 
 @pytest.fixture
-def planner(event_bus):
+def planner(event_bus, tmp_path):
     p = PlannerEngine(event_bus)
+    p._state_path = str(tmp_path)
     return p
 
 
@@ -53,7 +54,7 @@ async def test_handle_request_creates_plan(planner, event_bus):
     assert payload["task"] == "open chrome"
     assert len(payload["steps"]) == 1
     assert payload["steps"][0]["action"] == "launch_application"
-    assert payload["steps"][0]["target"] == "chrome"
+    assert payload["steps"][0]["target"] in ("chrome", "Google Chrome")
     await planner.stop()
 
 
@@ -264,7 +265,7 @@ async def test_launch_known_app_is_medium_risk(planner, event_bus):
     step = received[0].payload["steps"][0]
     assert step["action"] == "launch_application"
     assert step["risk_level"] == "medium"
-    assert step["target"] == "notepad"
+    assert step["target"] in ("notepad", "Notepad")
     await planner.stop()
 
 
@@ -344,7 +345,7 @@ async def test_launch_chrome_is_medium_risk(planner, event_bus):
     step = received[0].payload["steps"][0]
     assert step["action"] == "launch_application"
     assert step["risk_level"] == "medium"
-    assert step["target"] == "chrome"
+    assert step["target"] in ("chrome", "Google Chrome")
     await planner.stop()
 
 

@@ -42,36 +42,50 @@ _CODE_BLOCK_PATTERN = re.compile(r"```[\s\S]*?```|`[^`]+`")
 
 
 class VoiceEngine:
-    def __init__(self, event_bus: EventBus):
+    def __init__(
+        self,
+        event_bus: EventBus,
+        ring_buffer: RingBuffer | None = None,
+        audio_capture: AudioCapture | None = None,
+    ):
         self._event_bus = event_bus
 
         self._sample_rate = int(os.getenv("HELIX_VOICE_SAMPLE_RATE", "16000"))
         self._channels = int(os.getenv("HELIX_VOICE_CHANNELS", "1"))
-        self._backend = os.getenv("HELIX_VOICE_BACKEND", "mock")
-        self._stt_backend = os.getenv("HELIX_VOICE_STT_BACKEND", self._backend)
-        self._tts_backend = os.getenv("HELIX_VOICE_TTS_BACKEND", self._backend)
+        self._backend = os.getenv("HELIX_VOICE_BACKEND", "real")
+        env_stt = os.getenv("HELIX_VOICE_STT_BACKEND")
+        env_tts = os.getenv("HELIX_VOICE_TTS_BACKEND")
+        if self._backend == "mock":
+            self._stt_backend = env_stt or "mock"
+            self._tts_backend = env_tts or "mock"
+        else:
+            self._stt_backend = env_stt or ("faster_whisper" if self._backend in ("real", "auto") else self._backend)
+            self._tts_backend = env_tts or ("piper" if self._backend in ("real", "auto") else self._backend)
         self._stt_model = os.getenv("HELIX_VOICE_STT_MODEL", "tiny")
         self._tts_model = os.getenv("HELIX_VOICE_TTS_MODEL", "piper")
         self._wake_word = os.getenv("HELIX_VOICE_WAKE_WORD", "helix")
         self._wake_word_threshold = float(os.getenv("HELIX_VOICE_WAKE_THRESHOLD", "0.5"))
         self._audio_device = os.getenv("HELIX_VOICE_AUDIO_DEVICE", "default")
         self._stt_language = os.getenv("HELIX_VOICE_STT_LANGUAGE", "en")
-        self._idle_unload_seconds = int(os.getenv("HELIX_VOICE_IDLE_UNLOAD_SECONDS", "300"))
-        self._preload = os.getenv("HELIX_VOICE_PRELOAD", "false").lower() == "true"
-        self._keep_loaded = os.getenv("HELIX_VOICE_KEEP_LOADED", "false").lower() in ("true", "1", "yes")
+        self._stt_device = os.getenv("HELIX_VOICE_STT_DEVICE", "auto")
+        self._stt_compute_type = os.getenv("HELIX_VOICE_STT_COMPUTE_TYPE", "int8")
+        self._idle_unload_seconds = int(os.getenv("HELIX_VOICE_IDLE_UNLOAD_SECONDS", "1800"))
+        self._preload = os.getenv("HELIX_VOICE_PRELOAD", "true").lower() in ("true", "1", "yes")
+        self._keep_loaded = os.getenv("HELIX_VOICE_KEEP_LOADED", "true").lower() in ("true", "1", "yes")
         self._ring_seconds = int(os.getenv("HELIX_VOICE_RING_SECONDS", "3"))
 
         self._silence_threshold = float(os.getenv("HELIX_VOICE_SILENCE_THRESHOLD", "0.003"))
-        self._silence_duration = float(os.getenv("HELIX_VOICE_SILENCE_DURATION", "1.5"))
+        self._silence_duration = float(os.getenv("HELIX_VOICE_SILENCE_DURATION", "2.0"))
         self._max_listen_duration = float(os.getenv("HELIX_VOICE_MAX_LISTEN_DURATION", "30.0"))
         self._vad_chunk_duration = float(os.getenv("HELIX_VOICE_VAD_CHUNK_DURATION", "0.3"))
         self._voice_chunks_required = int(os.getenv("HELIX_VOICE_CHUNKS_REQUIRED", "3"))
 
         self._tts_sample_rate = self._sample_rate
+        self._local_playback_enabled = os.getenv("HELIX_VOICE_LOCAL_PLAYBACK", "false").lower() in ("true", "1", "yes")
 
         self._state = VoiceStateMachine()
-        self._ring = RingBuffer(max_seconds=self._ring_seconds, sample_rate=self._sample_rate)
-        self._capture = AudioCapture(
+        self._ring = ring_buffer if ring_buffer is not None else RingBuffer(max_seconds=self._ring_seconds, sample_rate=self._sample_rate)
+        self._capture = audio_capture if audio_capture is not None else AudioCapture(
             ring_buffer=self._ring,
             device=self._audio_device if self._audio_device != "default" else None,
             channels=self._channels,
@@ -85,6 +99,7 @@ class VoiceEngine:
         self._load_lock = asyncio.Lock()
         self._stt_load_lock = asyncio.Lock()
         self._tts_load_lock = asyncio.Lock()
+        self._tts_play_lock = asyncio.Lock()
         self._unload_task: asyncio.Task | None = None
         self._subscriptions: list[str] = []
         self._event_handler_map: dict[str, Any] = {}
@@ -113,6 +128,7 @@ class VoiceEngine:
             "voice.interrupt": self._handle_interrupt,
             "voice.shutdown": self._handle_shutdown,
             "system.state.change": self._handle_state_change,
+            "reminder.due": self._handle_reminder_due,
         }
         for event_type, handler in self._event_handler_map.items():
             self._event_bus.subscribe(event_type, handler)
@@ -171,6 +187,14 @@ class VoiceEngine:
     @property
     def state(self) -> str:
         return self._state.state_name
+
+    @property
+    def ring_buffer(self) -> RingBuffer:
+        return self._ring
+
+    @property
+    def audio_capture(self) -> AudioCapture:
+        return self._capture
 
     # ── Event Handlers ─────────────────────────────────────────
 
@@ -274,7 +298,8 @@ class VoiceEngine:
 
         try:
             await self._ensure_tts_loaded()
-            await self._synthesize_and_play(text)
+            async with self._tts_play_lock:
+                await self._synthesize_and_play(text)
 
             if not self._interrupting:
                 await self._event_bus.publish_event(
@@ -313,7 +338,26 @@ class VoiceEngine:
             self._interrupting = True
             self._listening = False
             if not self._keep_loaded:
-                await self._unload_models()
+                if self._idle_unload_seconds <= 0:
+                    await self._unload_models()
+                else:
+                    self._schedule_unload_if_idle()
+
+    async def _handle_reminder_due(self, event: HelixEvent) -> None:
+        text = event.payload.get("text", "")
+        if not text:
+            return
+        logger.info("Handling reminder.due event: %s", text)
+        spoken_text = f"Reminder: {text}"
+        await self._event_bus.publish_event(
+            source="voice_engine",
+            event_type="voice.tts",
+            payload={
+                "session_id": f"reminder_{event.payload.get('reminder_id', 'due')}",
+                "text": spoken_text,
+            },
+            correlation_id=event.correlation_id,
+        )
 
     # ── VAD + Capture Pipeline ────────────────────────────────
 
@@ -368,12 +412,107 @@ class VoiceEngine:
 
     @staticmethod
     def clean_text(text: str) -> str:
-        text = _CODE_BLOCK_PATTERN.sub("", text)
-        text = _HTML_TAG_PATTERN.sub("", text)
-        text = _URL_PATTERN.sub("link", text)
+        """
+        Normalize and clean markdown, Windows file paths, and technical punctuation
+        into natural, human-like speech for Text-To-Speech (TTS) engines.
+        """
+        if not text:
+            return ""
+
+        # 1. Strip code block fences and language tags, preserving readable code content
+        text = re.sub(r"```(?:\w+)?\n?([\s\S]*?)```", r" \1 ", text)
+        text = re.sub(r"`([^`]+)`", r" \1 ", text)
+
+        # 2. Convert raw JSON objects into natural human statements
+        trimmed = text.strip()
+        if trimmed.startswith("{") and trimmed.endswith("}"):
+            try:
+                import json
+                data = json.loads(trimmed)
+                if isinstance(data, dict):
+                    if "message" in data:
+                        text = str(data["message"])
+                    elif "name" in data:
+                        tool = data.get("name", "").replace("_", " ")
+                        text = f"Running {tool}."
+                    else:
+                        text = "I have processed the request."
+            except Exception:
+                text = re.sub(r'[{}\[\]"]', " ", text)
+
+        # 3. Markdown links: [Title](url) -> Title
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+
+        # 4. Raw URLs -> remove so TTS does not spell out http colon slash slash
+        text = re.sub(r"https?://\S+", "", text)
+
+        # 5. HTML tags
+        text = _HTML_TAG_PATTERN.sub(" ", text)
+
+        # 6. Plural indicators: e.g. file(s) -> files, application(s) -> applications
+        text = re.sub(r"(\w+)\(s\)", r"\1s", text, flags=re.IGNORECASE)
+        text = re.sub(r"(\w+)\(es\)", r"\1es", text, flags=re.IGNORECASE)
+
+        # 7. Redundant bullet paths: e.g. "- **name** (size) — `C:\path`" -> "- **name** (size)"
+        text = re.sub(r"—\s*[`'\"]?[A-Za-z]:\\[^`'\n]+[`'\"]?", "", text)
+
+        # 8. Windows paths in parentheses: e.g. (`C:\Windows\System32\notepad.exe`) -> ""
+        text = re.sub(r"\([`'\"]?[A-Za-z]:\\[^)]+[`'\"]?\)", "", text)
+
+        # 9. Standalone Windows paths: C:\Users\vaibh\Documents -> Documents folder
+        def _simplify_path(m: re.Match) -> str:
+            raw = m.group(0).strip("`'\"")
+            parts = [p for p in raw.replace("/", "\\").split("\\") if p]
+            if len(parts) > 1:
+                return f" {parts[-1]} "
+            return parts[0] if parts else ""
+        text = re.sub(r"[A-Za-z]:\\[\w\s.\-\\]+", _simplify_path, text)
+
+        # 10. ELIMINATE ALL BACKSLASHES AND SLASHES - A human never says "backslash"!
+        text = text.replace("\\", " ")
+        text = re.sub(r"(?<=\w)/(?=\w)", " and ", text)
+        text = text.replace("/", " ")
+
+        # 11. Markdown headers
+        text = re.sub(r"^\s*#{1,6}\s*(.+)$", r"\1.", text, flags=re.MULTILINE)
+
+        # 12. File sizes: (0.4 KB) -> 0.4 kilobytes
+        text = re.sub(r"\(\s*(\d+(?:\.\d+)?)\s*KB\s*\)", r", \1 kilobytes", text, flags=re.IGNORECASE)
+        text = re.sub(r"\(\s*(\d+(?:\.\d+)?)\s*MB\s*\)", r", \1 megabytes", text, flags=re.IGNORECASE)
+        text = re.sub(r"\(\s*(\d+(?:\.\d+)?)\s*GB\s*\)", r", \1 gigabytes", text, flags=re.IGNORECASE)
+
+        # 13. List bullets: replace with pauses
+        text = re.sub(r"^\s*[-*•]\s+", ", ", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s*\d+\.\s+", ", ", text, flags=re.MULTILINE)
+
+        # 14. Technical underscores in names: search_installed_apps -> search installed apps
+        text = re.sub(r"(?<=\w)_(?=\w)", " ", text)
+
+        # 15. Markdown symbols (bold, backticks, pipes, tildes)
+        text = re.sub(r"[*_~`>|#]", " ", text)
+
+        # 16. Technical brackets and quotes
+        text = re.sub(r'[\[\]{}()^@$%&+=~"\']', " ", text)
+        text = re.sub(r"—|–|--", ", ", text)
+
+        # 17. Emojis
         text = _EMOJI_PATTERN.sub("", text)
-        text = _MARKDOWN_PATTERN.sub("", text)
+
+        # 18. Ellipses
+        text = re.sub(r"\.{2,}", ". ", text)
+
+        # 19. Clean up spacing and commas
+        text = re.sub(r"\s+([,.:;?!])", r"\1", text)
+        text = re.sub(r",\s*,+", ",", text)
         text = _MULTI_SPACE_PATTERN.sub(" ", text)
+
+        # 20. Multi-item list summarization for speech
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if len(lines) > 4:
+            summary_intro = lines[0]
+            sample_items = [l.lstrip(",. ") for l in lines[1:4]]
+            text = f"{summary_intro}: {', '.join(sample_items)}, and more shown on your screen."
+
         return text.strip()
 
     # ── Public API ─────────────────────────────────────────────
@@ -394,7 +533,19 @@ class VoiceEngine:
             return b""
 
         if self._tts_backend == "mock":
-            return b""
+            import io
+            import wave
+
+            wav_io = io.BytesIO()
+            sample_rate = 16000
+            duration = min(max(len(text) * 0.05, 0.5), 3.0)
+            num_samples = int(sample_rate * duration)
+            with wave.open(wav_io, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(b"\x00\x00" * num_samples)
+            return wav_io.getvalue()
 
         await self._ensure_tts_loaded()
         self._last_used = time.time()
@@ -538,12 +689,28 @@ class VoiceEngine:
             try:
                 import whisper
                 return whisper.load_model(self._stt_model)
-            except ImportError:
-                raise ImportError("openai-whisper not installed. Install with: pip install openai-whisper")
+            except Exception:
+                logger.info("openai-whisper not available; falling back to faster-whisper")
+                self._stt_backend = "faster_whisper"
         if self._stt_backend == "faster_whisper":
             try:
                 from faster_whisper import WhisperModel
-                return WhisperModel(self._stt_model, compute_type="int8")
+                import ctranslate2
+                # Auto-detect: if CUDA is available use it, else fall back to CPU
+                device = self._stt_device
+                compute_type = self._stt_compute_type
+                try:
+                    supported = ctranslate2.get_supported_compute_types("cuda")
+                    if not supported or device not in ("cuda", "auto"):
+                        device = "cpu"
+                        compute_type = "int8"
+                    else:
+                        device = "cuda"
+                except Exception:
+                    device = "cpu"
+                    compute_type = "int8"
+                logger.info(f"Loading faster-whisper on device={device} compute_type={compute_type}")
+                return WhisperModel(self._stt_model, device=device, compute_type=compute_type)
             except ImportError:
                 raise ImportError("faster-whisper not installed. Install with: pip install faster-whisper")
         raise ValueError(f"Unknown STT backend: {self._stt_backend}")
@@ -561,7 +728,7 @@ class VoiceEngine:
                     if not model_path.is_absolute():
                         model_path = (project_root / model_path).resolve()
                 else:
-                    model_path = project_root / "models" / "tts" / "en_US-lessac-medium.onnx"
+                    model_path = Path(r"C:\Users\vaibh\Documents\HELIX_MODELS\PIPER\en_US-lessac-medium.onnx")
                 if not model_path.exists():
                     raise FileNotFoundError(f"Piper model not found: {model_path}")
                 voice = PiperVoice.load(str(model_path))
@@ -580,14 +747,21 @@ class VoiceEngine:
     # ── Transcription ──────────────────────────────────────────
 
     async def _transcribe(self, audio_data: bytes) -> str:
+        if not audio_data:
+            return ""
         if self._stt_backend == "mock":
-            return "This is a mock transcription."
+            return ""
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._transcribe_blocking, audio_data)
 
     def _transcribe_blocking(self, audio_data: bytes) -> str:
         import numpy as np
+
+        if not audio_data:
+            return ""
+
+        lang = None if (not self._stt_language or self._stt_language.lower() in ("auto", "none", "detect")) else self._stt_language
 
         is_media_file = False
         if len(audio_data) % 4 != 0:
@@ -624,11 +798,11 @@ class VoiceEngine:
 
             try:
                 if self._stt_backend == "whisper" and self._stt_model_instance:
-                    result = self._stt_model_instance.transcribe(temp_path, language=self._stt_language)
+                    result = self._stt_model_instance.transcribe(temp_path, language=lang)
                     return result["text"].strip()
 
                 if self._stt_backend == "faster_whisper" and self._stt_model_instance:
-                    segments, info = self._stt_model_instance.transcribe(temp_path, language=self._stt_language)
+                    segments, info = self._stt_model_instance.transcribe(temp_path, language=lang)
                     return " ".join(segment.text for segment in segments).strip()
             finally:
                 try:
@@ -638,12 +812,16 @@ class VoiceEngine:
         else:
             if self._stt_backend == "whisper" and self._stt_model_instance:
                 audio_array = np.frombuffer(audio_data, dtype=np.float32)
-                result = self._stt_model_instance.transcribe(audio_array, language=self._stt_language)
+                result = self._stt_model_instance.transcribe(audio_array, language=lang)
                 return result["text"].strip()
 
             if self._stt_backend == "faster_whisper" and self._stt_model_instance:
-                audio_array = np.frombuffer(audio_data, dtype=np.float32)
-                segments, info = self._stt_model_instance.transcribe(audio_array, language=self._stt_language)
+                if len(audio_data) % 4 == 0:
+                    audio_array = np.frombuffer(audio_data, dtype=np.float32)
+                else:
+                    int16_arr = np.frombuffer(audio_data, dtype=np.int16)
+                    audio_array = (int16_arr / 32768.0).astype(np.float32)
+                segments, info = self._stt_model_instance.transcribe(audio_array, language=lang)
                 return " ".join(segment.text for segment in segments).strip()
 
         raise ValueError(f"STT not available for backend: {self._stt_backend}")
@@ -656,6 +834,12 @@ class VoiceEngine:
             return
         if self._tts_backend == "mock":
             await asyncio.sleep(0.1)
+            return
+
+        # If local hardware sounddevice playback is disabled, do not play through host sounddevice.
+        # In client-server / web app mode, audio is played by the client browser.
+        # Playing through both sounddevice and browser creates an overlapping echo.
+        if not self._local_playback_enabled:
             return
 
         self._last_used = time.time()

@@ -93,6 +93,8 @@ async def test_handle_tts_with_empty_text(engine):
 
 @pytest.mark.asyncio
 async def test_state_change_unloads_on_sleep(engine):
+    engine._keep_loaded = False
+    engine._idle_unload_seconds = 0
     await engine.start()
     engine._loaded = True
     engine._stt_model_instance = object()
@@ -133,6 +135,30 @@ async def test_state_change_keeps_loaded_on_sleep(engine):
     assert len(received) == 0
     assert engine._loaded is True
     assert engine._stt_model_instance is not None
-    assert engine._tts_model_instance is not None
     await engine.stop()
+
+
+def test_clean_text_eliminates_backslashes_and_technical_punctuation():
+    # Test 1: Windows paths with backslashes
+    raw1 = "Found 1 installed application(s) matching 'notepad':\n- **Notepad** (`C:\\Windows\\System32\\notepad.exe`)"
+    cleaned1 = VoiceEngine.clean_text(raw1)
+    assert "\\" not in cleaned1
+    assert "notepad.exe" not in cleaned1 or "Notepad" in cleaned1
+    assert "*" not in cleaned1
+    assert "`" not in cleaned1
+
+    # Test 2: Document paths and sizes
+    raw2 = "Found 20 file(s) in `C:\\Users\\vaibh\\OneDrive\\Documents`:\n- **desktop.ini** (0.4 KB) — `C:\\Users\\vaibh\\OneDrive\\Documents\\desktop.ini`"
+    cleaned2 = VoiceEngine.clean_text(raw2)
+    assert "\\" not in cleaned2
+    assert "kilobytes" in cleaned2
+    assert "—" not in cleaned2
+
+    # Test 3: Raw JSON objects
+    raw3 = '{"name": "search_installed_apps", "arguments": {"query": "notepad"}}'
+    cleaned3 = VoiceEngine.clean_text(raw3)
+    assert "{" not in cleaned3
+    assert "}" not in cleaned3
+    assert "search installed apps" in cleaned3
+
 

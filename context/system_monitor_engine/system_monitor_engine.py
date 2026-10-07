@@ -120,6 +120,18 @@ class SystemMonitorEngine:
                     "plugged": battery.power_plugged,
                 }
 
+            # Network I/O
+            try:
+                net_io = psutil.net_io_counters()
+                metrics["network"] = {
+                    "bytes_sent": net_io.bytes_sent,
+                    "bytes_recv": net_io.bytes_recv,
+                    "packets_sent": net_io.packets_sent,
+                    "packets_recv": net_io.packets_recv,
+                }
+            except Exception:
+                pass
+
             # Idle detection
             if cpu < self._idle_cpu_threshold:
                 if self._last_low_cpu_time is None:

@@ -18,6 +18,8 @@ import { GlassCard } from '@/components/os/GlassCard'
 import { StatusBadge } from '@/components/os/GlassCard'
 import { cn } from '@/lib/utils'
 import { useWork } from '@/lib/hooks/use-work'
+import { api } from '@/lib/api-client'
+import { RemindersWidget } from '@/components/os/RemindersWidget'
 
 type FlowNodeType = 'trigger' | 'action' | 'condition' | 'output'
 
@@ -114,6 +116,22 @@ export function AutomationPage() {
     [setEdges],
   )
 
+  const [running, setRunning] = useState(false)
+
+  const handleRunPipeline = async () => {
+    const pipe = pipelines[selectedPipeline]
+    if (!pipe) return
+    setRunning(true)
+    try {
+      const res = await api.automation.runPipeline(pipe.name.toLowerCase().replace(/ /g, '_'))
+      console.log('Pipeline run completed:', res)
+    } catch (e) {
+      console.warn('Failed to run pipeline', e)
+    } finally {
+      setRunning(false)
+    }
+  }
+
   return (
     <div className="flex h-full">
       {/* Pipeline list */}
@@ -153,6 +171,9 @@ export function AutomationPage() {
             </button>
           ))}
         </div>
+        <div className="p-3 border-t border-[rgba(255,255,255,0.06)]">
+          <RemindersWidget />
+        </div>
       </div>
 
       {/* Flow canvas */}
@@ -168,8 +189,12 @@ export function AutomationPage() {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-zinc-600 font-mono">{pipelines[selectedPipeline].runs.toLocaleString()} runs</span>
-            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[rgba(34,197,94,0.1)] border border-[rgba(34,197,94,0.2)] text-[#22c55e] text-xs font-medium hover:bg-[rgba(34,197,94,0.15)] transition-colors">
-              <Play className="w-3 h-3" /> Run Now
+            <button
+              onClick={handleRunPipeline}
+              disabled={running}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[rgba(34,197,94,0.1)] border border-[rgba(34,197,94,0.2)] text-[#22c55e] text-xs font-medium hover:bg-[rgba(34,197,94,0.15)] transition-colors disabled:opacity-50"
+            >
+              <Play className="w-3 h-3" /> {running ? 'Running...' : 'Run Now'}
             </button>
           </div>
         </div>
@@ -207,7 +232,7 @@ export function AutomationPage() {
             fitViewOptions={{ padding: 0.3 }}
           >
             <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="rgba(255,255,255,0.025)" />
-            <Controls />
+            <Controls position="top-right" />
           </ReactFlow>
         </div>
       </div>

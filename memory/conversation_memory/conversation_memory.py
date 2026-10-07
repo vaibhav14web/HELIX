@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 from foundation.event_bus.event_bus import EventBus, HelixEvent
 
 
+from foundation.storage_manager.crypto import encrypt_string, decrypt_string
+
+
 class ConversationEntry(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     session_id: str
@@ -31,6 +34,22 @@ class ConversationMemory:
         self._subscriptions: list[str] = []
         self._event_handler_map: dict[str, object] = {}
         self._file_locks: dict[str, object] = {}
+
+    def _read_file_lines(self, file_path: Path) -> list[str]:
+        if not file_path.exists():
+            return []
+        try:
+            raw_bytes = file_path.read_bytes()
+            content = decrypt_string(raw_bytes)
+            return [line for line in content.splitlines() if line.strip()]
+        except Exception:
+            return []
+
+    def _append_file_line(self, file_path: Path, line: str) -> None:
+        lines = self._read_file_lines(file_path)
+        lines.append(line)
+        text = "\n".join(lines) + "\n"
+        file_path.write_bytes(encrypt_string(text))
 
     async def start(self) -> None:
         self._event_handler_map = {
@@ -98,8 +117,7 @@ class ConversationMemory:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         file_path = self._conversations_path / f"{session_id}_{date_str}.jsonl"
         async with self._get_file_lock(file_path):
-            with open(file_path, "a", encoding="utf-8") as f:
-                f.write(entry.model_dump_json() + "\n")
+            self._append_file_line(file_path, entry.model_dump_json())
         await self._enforce_rolling_window(session_id)
         await self._event_bus.publish_event(
             source="conversation_memory",
@@ -117,19 +135,15 @@ class ConversationMemory:
         query_lower = query.lower()
         for file_path in self._conversations_path.glob("*.jsonl"):
             async with self._get_file_lock(file_path):
-                with open(file_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            entry = ConversationEntry(**json.loads(line))
-                            if query_lower in entry.content.lower():
-                                results.append(entry)
-                                if len(results) >= limit:
-                                    return results
-                        except (json.JSONDecodeError, ValueError):
-                            continue
+                for line in self._read_file_lines(file_path):
+                    try:
+                        entry = ConversationEntry(**json.loads(line))
+                        if query_lower in entry.content.lower():
+                            results.append(entry)
+                            if len(results) >= limit:
+                                return results
+                    except (json.JSONDecodeError, ValueError):
+                        continue
         return results
 
     async def get_all_sessions(self) -> list[str]:
@@ -155,33 +169,25 @@ class ConversationMemory:
     async def _load_from_disk(self, session_id: str, limit: int = 50) -> list[ConversationEntry]:
         entries: list[ConversationEntry] = []
         for file_path in sorted(self._conversations_path.glob(f"{session_id}_*.jsonl"), reverse=True):
-            with open(file_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entries.append(ConversationEntry(**json.loads(line)))
-                    except (json.JSONDecodeError, ValueError):
-                        continue
+            for line in self._read_file_lines(file_path):
+                try:
+                    entries.append(ConversationEntry(**json.loads(line)))
+                except (json.JSONDecodeError, ValueError):
+                    continue
         return entries[-limit:]
 
     async def _load_recent(self, session_id: str) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self._rolling_days)
         for file_path in sorted(self._conversations_path.glob(f"{session_id}_*.jsonl"), reverse=True):
-            with open(file_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = ConversationEntry(**json.loads(line))
-                        entry_time = datetime.fromisoformat(entry.timestamp)
-                        if entry_time > cutoff:
-                            if session_id in self._active:
-                                self._active[session_id].append(entry)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
+            for line in self._read_file_lines(file_path):
+                try:
+                    entry = ConversationEntry(**json.loads(line))
+                    entry_time = datetime.fromisoformat(entry.timestamp)
+                    if entry_time > cutoff:
+                        if session_id in self._active:
+                            self._active[session_id].append(entry)
+                except (json.JSONDecodeError, ValueError):
+                    continue
 
     async def _enforce_rolling_window(self, session_id: str) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self._rolling_days)

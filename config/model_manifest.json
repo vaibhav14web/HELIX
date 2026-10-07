@@ -1,0 +1,10 @@
+{
+  "qwen3-4b-q8_0.gguf": {
+    "path": "C:\\Users\\vaibh\\Documents\\HELIX_MODELS\\LLM\\Qwen3-4B-Q8_0.gguf",
+    "sha256": ""
+  },
+  "qwen2.5-coder-3b-instruct-q8_0.gguf": {
+    "path": "C:\\Users\\vaibh\\Documents\\HELIX_MODELS\\LLM\\qwen2.5-coder-3b-instruct-q8_0.gguf",
+    "sha256": ""
+  }
+}

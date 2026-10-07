@@ -5,6 +5,11 @@ from fastapi.testclient import TestClient
 # Import the app
 from api.main import app
 import api.main
+from foundation.auth import get_or_create_auth_token
+
+def get_auth_headers():
+    token = get_or_create_auth_token()
+    return {"Authorization": f"Bearer {token}"}
 
 def test_add_auto_approve_pattern():
     mock_perm = MagicMock()
@@ -19,7 +24,7 @@ def test_add_auto_approve_pattern():
 
     try:
         client = TestClient(app)
-        response = client.post("/permission/auto-approve", json={"pattern": "git *"})
+        response = client.post("/permission/auto-approve", json={"pattern": "git *"}, headers=get_auth_headers())
         assert response.status_code == 200
         data = response.json()
         assert data["pattern"] == "git *"
@@ -46,7 +51,7 @@ def test_remove_auto_approve_pattern():
 
     try:
         client = TestClient(app)
-        response = client.delete("/permission/auto-approve?pattern=git%20*")
+        response = client.delete("/permission/auto-approve?pattern=git%20*", headers=get_auth_headers())
         assert response.status_code == 200
         data = response.json()
         assert data["pattern"] == "git *"
@@ -73,7 +78,7 @@ def test_voice_interrupt():
 
     try:
         client = TestClient(app)
-        response = client.post("/voice/interrupt")
+        response = client.post("/voice/interrupt", headers=get_auth_headers())
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "interrupted"
@@ -85,3 +90,4 @@ def test_voice_interrupt():
     finally:
         api.main.voice_engine = orig_voice
         api.main.event_bus = orig_event_bus
+

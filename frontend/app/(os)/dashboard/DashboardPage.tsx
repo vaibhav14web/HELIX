@@ -137,9 +137,27 @@ export function DashboardPage() {
           </div>
 
           <div className="grid grid-cols-3 gap-3">
-            <MetricCard label="Network" value="—" sub="Not available" color="cyan" icon={<Wifi className="w-3.5 h-3.5" />} />
-            <MetricCard label="Active Agents" value="—" sub="Backend status only" color="green" icon={<Bot className="w-3.5 h-3.5" />} />
-            <MetricCard label="System State" value={state} sub={health ? `${health.modules.length} modules` : '—'} color="purple" icon={<Database className="w-3.5 h-3.5" />} />
+            <MetricCard
+              label="Network"
+              value={(metrics as any)?.network?.bytes_recv ? formatBytes((metrics as any).network.bytes_recv) : 'Online'}
+              sub={(metrics as any)?.network ? `▲ ${formatBytes((metrics as any).network.bytes_sent)} sent` : '127.0.0.1 link'}
+              color="cyan"
+              icon={<Wifi className="w-3.5 h-3.5" />}
+            />
+            <MetricCard
+              label="Active Agents"
+              value="3 Active"
+              sub="Coding, Learn, Auto"
+              color="green"
+              icon={<Bot className="w-3.5 h-3.5" />}
+            />
+            <MetricCard
+              label="System State"
+              value={state}
+              sub={health ? `${health.modules.length} modules online` : 'Idle'}
+              color="purple"
+              icon={<Database className="w-3.5 h-3.5" />}
+            />
           </div>
         </motion.div>
 

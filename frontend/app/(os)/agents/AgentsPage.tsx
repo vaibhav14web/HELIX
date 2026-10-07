@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils'
 import { usePermissions } from '@/lib/hooks/use-permissions'
 import { useWork } from '@/lib/hooks/use-work'
 import { useSystemStats, useSystemState } from '@/lib/hooks/use-system'
+import { api } from '@/lib/api-client'
 
 type AgentStatus = 'online' | 'busy' | 'idle' | 'offline' | 'error'
 
@@ -30,42 +31,42 @@ interface Agent {
 const defaultAgents: Agent[] = [
   {
     id: '1', name: 'ResearchBot', description: 'Deep web research & synthesis',
-    status: 'idle', model: 'ollama/qwen3:1.7b', progress: undefined,
+    status: 'idle', model: 'llama.cpp/Qwen3-4B', progress: undefined,
     task: undefined,
     tasksCompleted: 0, tokensUsed: '0', uptime: '—',
     color: 'text-[#00d4ff]', bgColor: 'bg-[rgba(0,212,255,0.08)]',
   },
   {
     id: '2', name: 'DataBot', description: 'Data processing & memory indexing',
-    status: 'idle', model: 'ollama/qwen3:1.7b', progress: undefined,
+    status: 'idle', model: 'llama.cpp/Qwen3-4B', progress: undefined,
     task: undefined,
     tasksCompleted: 0, tokensUsed: '0', uptime: '—',
     color: 'text-[#7c3aed]', bgColor: 'bg-[rgba(124,58,237,0.08)]',
   },
   {
     id: '3', name: 'AutoBot', description: 'Automation pipeline executor',
-    status: 'idle', model: 'ollama/qwen3:1.7b', progress: undefined,
+    status: 'idle', model: 'llama.cpp/Qwen3-4B', progress: undefined,
     task: undefined,
     tasksCompleted: 0, tokensUsed: '0', uptime: '—',
     color: 'text-[#22c55e]', bgColor: 'bg-[rgba(34,197,94,0.08)]',
   },
   {
     id: '4', name: 'CodeBot', description: 'Code generation & review',
-    status: 'idle', model: 'ollama/qwen3:1.7b', progress: undefined,
+    status: 'idle', model: 'llama.cpp/qwen2.5-coder:3b', progress: undefined,
     task: undefined,
     tasksCompleted: 0, tokensUsed: '0', uptime: '—',
     color: 'text-[#f59e0b]', bgColor: 'bg-[rgba(245,158,11,0.08)]',
   },
   {
     id: '5', name: 'MonitorBot', description: 'System health monitoring',
-    status: 'online', model: 'ollama/qwen3:1.7b', progress: undefined,
+    status: 'online', model: 'llama.cpp/Qwen3-4B', progress: undefined,
     task: 'Waiting for data...',
     tasksCompleted: 0, tokensUsed: '0', uptime: '—',
     color: 'text-[#ef4444]', bgColor: 'bg-[rgba(239,68,68,0.08)]',
   },
   {
     id: '6', name: 'SchedulerBot', description: 'Task scheduling & queue management',
-    status: 'idle', model: 'ollama/qwen3:1.7b', progress: undefined,
+    status: 'idle', model: 'llama.cpp/Qwen3-4B', progress: undefined,
     task: undefined,
     tasksCompleted: 0, tokensUsed: '0', uptime: '—',
     color: 'text-zinc-500', bgColor: 'bg-[rgba(255,255,255,0.04)]',
@@ -99,6 +100,18 @@ export function AgentsPage() {
 
   const filtered = filter === 'all' ? agents : agents.filter((a) => a.status === filter)
 
+  const handleDeployAgent = async () => {
+    const name = window.prompt('Enter new agent name:')
+    if (!name?.trim()) return
+    const role = window.prompt('Enter agent role/description:') || 'Custom Subagent'
+    try {
+      await api.agents.deploy({ name: name.trim(), role: role.trim() })
+      alert(`Agent '${name}' deployed successfully!`)
+    } catch (e) {
+      console.warn('Failed to deploy agent', e)
+    }
+  }
+
   return (
     <div className="flex h-full">
       {/* Agent list */}
@@ -106,7 +119,7 @@ export function AgentsPage() {
         <div className="p-4 border-b border-[rgba(255,255,255,0.06)]">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-zinc-200">Agent Network</h2>
-            <button className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[rgba(0,212,255,0.08)] border border-[rgba(0,212,255,0.2)] text-[#00d4ff] text-xs font-medium hover:bg-[rgba(0,212,255,0.12)] transition-colors">
+            <button onClick={handleDeployAgent} className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[rgba(0,212,255,0.08)] border border-[rgba(0,212,255,0.2)] text-[#00d4ff] text-xs font-medium hover:bg-[rgba(0,212,255,0.12)] transition-colors">
               <Plus className="w-3 h-3" />
               Deploy
             </button>

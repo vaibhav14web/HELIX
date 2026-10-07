@@ -9,6 +9,7 @@ import { usePermissions } from '@/lib/hooks/use-permissions'
 import { useOSStore } from '@/lib/os-store'
 import { api } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
+import { cleanTextForSpeech } from '@/lib/speech-cleaner'
 
 type VoiceState = 'idle' | 'listening' | 'processing' | 'speaking' | 'interrupted' | 'permission_pending'
 
@@ -109,13 +110,55 @@ export function VoicePage() {
     }
   }, [pendingCount, voiceState])
 
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const animFrameRef = useRef<number | null>(null)
+  const maxTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  const stopAudioCapture = useCallback(() => {
+    if (maxTimeoutRef.current) {
+      clearTimeout(maxTimeoutRef.current)
+      maxTimeoutRef.current = null
+    }
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current)
+      animFrameRef.current = null
+    }
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close()
+      } catch {}
+      audioContextRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      stopAudioCapture()
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause()
+        currentAudioRef.current = null
+      }
+    }
+  }, [stopAudioCapture])
+
   const toggle = useCallback(async () => {
     if (voiceState === 'speaking') {
       handleInterrupt()
       return
     }
 
+    if (voiceState === 'listening') {
+      // User manually stopped listening -> finish and process immediately
+      stopAudioCapture()
+      if (mediaRecorder.current && mediaRecorder.current.state === 'recording') {
+        setVoiceState('processing')
+        mediaRecorder.current.stop()
+      }
+      return
+    }
+
     if (voiceState === 'idle' || voiceState === 'permission_pending') {
+      stopAudioCapture()
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
         const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
@@ -127,6 +170,7 @@ export function VoicePage() {
         }
 
         recorder.onstop = async () => {
+          stopAudioCapture()
           stream.getTracks().forEach((t) => t.stop())
           const blob = new Blob(audioChunks.current, { type: 'audio/webm' })
           if (blob.size === 0) {
@@ -141,30 +185,61 @@ export function VoicePage() {
               ...prev,
               { time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }), speaker: 'User', text: result.text || 'Voice command sent' },
             ])
+            const playVoiceFallback = (text: string) => {
+              const cleaned = cleanTextForSpeech(text)
+              if (typeof window !== 'undefined' && 'speechSynthesis' in window && cleaned) {
+                setVoiceState('speaking')
+                window.speechSynthesis.cancel()
+                const utterance = new SpeechSynthesisUtterance(cleaned)
+                utterance.onend = () => setVoiceState('idle')
+                utterance.onerror = () => setVoiceState('idle')
+                window.speechSynthesis.speak(utterance)
+              } else {
+                setVoiceState('idle')
+              }
+            }
+
+            if (result.response) {
+              setTranscripts((prev) => [
+                ...prev,
+                { time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }), speaker: 'HELIX', text: result.response },
+              ])
+            }
+
             if (result.audio) {
               setVoiceState('speaking')
+              if (typeof window !== 'undefined' && (window as any).__helix_current_audio) {
+                try {
+                  (window as any).__helix_current_audio.pause()
+                } catch {}
+              }
               const audio = new Audio(`data:audio/wav;base64,${result.audio}`)
               currentAudioRef.current = audio
+              if (typeof window !== 'undefined') {
+                ;(window as any).__helix_current_audio = audio
+              }
               audio.onended = () => {
                 currentAudioRef.current = null
+                if (typeof window !== 'undefined' && (window as any).__helix_current_audio === audio) {
+                  ;(window as any).__helix_current_audio = null
+                }
                 setVoiceState('idle')
               }
               audio.play().catch(() => {
                 currentAudioRef.current = null
-                setVoiceState('idle')
+                if (typeof window !== 'undefined' && (window as any).__helix_current_audio === audio) {
+                  ;(window as any).__helix_current_audio = null
+                }
+                if (result.response) {
+                  playVoiceFallback(result.response)
+                } else {
+                  setVoiceState('idle')
+                }
               })
-              setTranscripts((prev) => [
-                ...prev,
-                { time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }), speaker: 'HELIX', text: result.response },
-              ])
             } else if (result.response) {
-              setTranscripts((prev) => [
-                ...prev,
-                { time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }), speaker: 'HELIX', text: result.response },
-              ])
-              setTimeout(() => setVoiceState('idle'), 1500)
+              playVoiceFallback(result.response)
             } else {
-              setTimeout(() => setVoiceState('idle'), 1000)
+              setVoiceState('idle')
             }
           } catch {
             setVoiceState('idle')
@@ -174,22 +249,75 @@ export function VoicePage() {
         recorder.start()
         setVoiceState('listening')
         setTranscript('')
-        setTimeout(() => {
+
+        // VAD: Speech Activity & Silence detection
+        try {
+          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)()
+          audioContextRef.current = audioCtx
+          const source = audioCtx.createMediaStreamSource(stream)
+          const analyser = audioCtx.createAnalyser()
+          analyser.fftSize = 512
+          source.connect(analyser)
+
+          const dataArray = new Float32Array(analyser.fftSize)
+          let speechDetected = false
+          let silenceStartTime: number | null = null
+          const listenStartTime = Date.now()
+
+          const checkVolume = () => {
+            if (!mediaRecorder.current || mediaRecorder.current.state !== 'recording') return
+            analyser.getFloatTimeDomainData(dataArray)
+            let sumSquares = 0
+            for (let i = 0; i < dataArray.length; i++) {
+              sumSquares += dataArray[i] * dataArray[i]
+            }
+            const rms = Math.sqrt(sumSquares / dataArray.length)
+
+            const now = Date.now()
+            if (rms > 0.012) {
+              speechDetected = true
+              silenceStartTime = null
+            } else {
+              if (speechDetected) {
+                if (!silenceStartTime) {
+                  silenceStartTime = now
+                } else if (now - silenceStartTime > 2200) {
+                  // User finished speaking, detected 2.2s silence
+                  stopAudioCapture()
+                  if (mediaRecorder.current?.state === 'recording') {
+                    setVoiceState('processing')
+                    mediaRecorder.current.stop()
+                  }
+                  return
+                }
+              } else if (now - listenStartTime > 12000) {
+                // No speech detected after 12 seconds
+                stopAudioCapture()
+                if (mediaRecorder.current?.state === 'recording') {
+                  mediaRecorder.current.stop()
+                }
+                return
+              }
+            }
+
+            animFrameRef.current = requestAnimationFrame(checkVolume)
+          }
+
+          animFrameRef.current = requestAnimationFrame(checkVolume)
+        } catch {}
+
+        maxTimeoutRef.current = setTimeout(() => {
+          stopAudioCapture()
           if (mediaRecorder.current?.state === 'recording') {
+            setVoiceState('processing')
             mediaRecorder.current.stop()
           }
-        }, 5000)
+        }, 35000)
       } catch {
         setVoiceState('idle')
       }
-    } else {
-      if (mediaRecorder.current?.state === 'recording') {
-        mediaRecorder.current.stop()
-      }
-      setVoiceState('idle')
-      setTranscript('')
     }
-  }, [voiceState, command, handleInterrupt])
+  }, [voiceState, command, handleInterrupt, stopAudioCapture, activeSessionId])
 
   const cfg = stateConfig[voiceState]
   const Icon = cfg.icon

@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
 import { motion } from 'framer-motion'
-import { Terminal, Search, Clock, AlertCircle, Info, AlertTriangle, Bug } from 'lucide-react'
+import { Terminal, Search, Clock, AlertCircle, Info, AlertTriangle, Bug, Copy, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 type LogLevel = 'info' | 'warn' | 'error' | 'debug'
@@ -22,9 +22,9 @@ export function LogsPage() {
   const [levelFilter, setLevelFilter] = useState<LogLevel | 'all'>('all')
   const [categoryFilter, setCategoryFilter] = useState<LogCategory>('all')
   const [autoScroll, setAutoScroll] = useState(true)
+  const [copyState, setCopyState] = useState('Copy')
 
-  // Query logs from backend, polling every 3 seconds to keep it fresh
-  const { data: logsData } = useQuery({
+  const { data: logsData, refetch, isFetching } = useQuery({
     queryKey: ['system_logs', levelFilter],
     queryFn: () => {
       const level = levelFilter === 'all'
@@ -39,9 +39,7 @@ export function LogsPage() {
 
   const logs = logsData?.logs || []
 
-  // Filter logs locally based on search term and category
   const filtered = logs.filter((l) => {
-    // Category match logic
     if (categoryFilter !== 'all') {
       const mod = l.module.toLowerCase()
       const isVoice = mod.includes('voice') || mod.includes('wake')
@@ -54,7 +52,6 @@ export function LogsPage() {
       if (categoryFilter === 'system' && (isVoice || isAutomation || isPermissions)) return false
     }
 
-    // Search filter matching module or message
     if (search) {
       const s = search.toLowerCase()
       if (!l.message.toLowerCase().includes(s) && !l.module.toLowerCase().includes(s)) {
@@ -65,16 +62,26 @@ export function LogsPage() {
     return true
   })
 
+  const copyLogs = async () => {
+    const text = filtered.map((log) => `[${log.level}] ${log.module}: ${log.message}`).join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopyState('Copied')
+      setTimeout(() => setCopyState('Copy'), 1200)
+    } catch {
+      setCopyState('Failed')
+      setTimeout(() => setCopyState('Copy'), 1200)
+    }
+  }
+
   return (
     <div className="flex flex-col h-full bg-[#09090b]">
-      {/* Header and Controls */}
       <div className="flex flex-wrap items-center gap-3 px-6 py-4 border-b border-[rgba(255,255,255,0.06)] shrink-0">
         <div className="flex items-center gap-2">
           <Terminal className="w-4 h-4 text-[#00d4ff]" />
           <h1 className="text-sm font-semibold text-zinc-200">System Logs</h1>
         </div>
 
-        {/* Search */}
         <div className="relative ml-2">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
           <input
@@ -85,7 +92,6 @@ export function LogsPage() {
           />
         </div>
 
-        {/* Severity Level Filter */}
         <div className="flex items-center gap-1 bg-[rgba(255,255,255,0.02)] p-0.5 rounded-lg border border-[rgba(255,255,255,0.04)]">
           {(['all', 'info', 'warn', 'error', 'debug'] as const).map((l) => (
             <button
@@ -103,7 +109,6 @@ export function LogsPage() {
           ))}
         </div>
 
-        {/* Category Filter */}
         <div className="flex items-center gap-1 bg-[rgba(255,255,255,0.02)] p-0.5 rounded-lg border border-[rgba(255,255,255,0.04)]">
           {(['all', 'system', 'voice', 'automation', 'permissions'] as const).map((c) => (
             <button
@@ -123,7 +128,16 @@ export function LogsPage() {
 
         <div className="flex-1" />
 
-        {/* Auto-scroll option */}
+        <button onClick={() => refetch()} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-[rgba(255,255,255,0.06)] text-zinc-400 hover:text-zinc-200">
+          <RefreshCw className={cn('w-3 h-3', isFetching && 'animate-spin')} />
+          Refresh
+        </button>
+
+        <button onClick={copyLogs} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-[rgba(0,212,255,0.15)] bg-[rgba(0,212,255,0.08)] text-[#00d4ff]">
+          <Copy className="w-3 h-3" />
+          {copyState}
+        </button>
+
         <button
           onClick={() => setAutoScroll((v) => !v)}
           className={cn(
@@ -138,7 +152,6 @@ export function LogsPage() {
         </button>
       </div>
 
-      {/* Logs List */}
       <div className="flex-1 overflow-y-auto p-4 font-mono text-[11px] leading-relaxed bg-[#0c0c0e]">
         <div className="space-y-1">
           {filtered.length > 0 ? (
@@ -157,14 +170,19 @@ export function LogsPage() {
                   className="flex items-start gap-3 px-3 py-1.5 rounded-md hover:bg-[rgba(255,255,255,0.02)] transition-colors group"
                 >
                   <span className={cn('text-zinc-700 w-16 shrink-0 font-mono transition-opacity', autoScroll && 'opacity-60')}>
-                    {log.timestamp
-                      ? new Date(log.timestamp).toLocaleTimeString('en-US', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                          second: '2-digit',
-                          hour12: false,
-                        })
-                      : '--:--:--'}
+                    {(() => {
+                      if (!log.timestamp) return '--:--:--'
+                      try {
+                        const d = new Date(log.timestamp)
+                        if (!isNaN(d.getTime())) {
+                          return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+                        }
+                      } catch {
+                        // ignore fallback
+                      }
+                      const parts = log.timestamp.split('T')[1] || log.timestamp.split(' ')[1] || log.timestamp
+                      return parts.split('.')[0].split(',')[0].slice(0, 8)
+                    })()}
                   </span>
                   <div className={cn('p-0.5 rounded shrink-0', cfg.bg)}>
                     <Icon className={cn('w-3 h-3', cfg.color)} />

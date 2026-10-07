@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 from foundation.event_bus.event_bus import EventBus, HelixEvent
 
 
+from foundation.storage_manager.crypto import encrypt_string, decrypt_string
+
+
 class ExplanationRecord(BaseModel):
     decision_id: str = Field(default_factory=lambda: os.urandom(16).hex())
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -84,57 +87,51 @@ class ExplainabilityEngine:
             correlation_id=event.correlation_id,
         )
 
+    def _read_lines(self) -> list[str]:
+        if not self._explanations_path.exists():
+            return []
+        try:
+            raw_bytes = self._explanations_path.read_bytes()
+            content = decrypt_string(raw_bytes)
+            return [line for line in content.splitlines() if line.strip()]
+        except Exception:
+            return []
+
     def _append_to_log(self, record: ExplanationRecord) -> None:
-        with open(self._explanations_path, "a", encoding="utf-8") as f:
-            f.write(record.model_dump_json() + "\n")
+        lines = self._read_lines()
+        lines.append(record.model_dump_json())
+        text = "\n".join(lines) + "\n"
+        self._explanations_path.write_bytes(encrypt_string(text))
 
     def find_by_id(self, decision_id: str) -> ExplanationRecord | None:
-        if not self._explanations_path.exists():
-            return None
-        with open(self._explanations_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = ExplanationRecord(**json.loads(line))
-                    if record.decision_id == decision_id:
-                        return record
-                except (json.JSONDecodeError, ValueError):
-                    continue
+        for line in self._read_lines():
+            try:
+                record = ExplanationRecord(**json.loads(line))
+                if record.decision_id == decision_id:
+                    return record
+            except (json.JSONDecodeError, ValueError):
+                continue
         return None
 
     def find_by_action(self, action: str, limit: int = 10) -> list[ExplanationRecord]:
         results: list[ExplanationRecord] = []
-        if not self._explanations_path.exists():
-            return results
         action_lower = action.lower()
-        with open(self._explanations_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = ExplanationRecord(**json.loads(line))
-                    if action_lower in record.action.lower():
-                        results.append(record)
-                        if len(results) >= limit:
-                            break
-                except (json.JSONDecodeError, ValueError):
-                    continue
+        for line in self._read_lines():
+            try:
+                record = ExplanationRecord(**json.loads(line))
+                if action_lower in record.action.lower():
+                    results.append(record)
+                    if len(results) >= limit:
+                        break
+            except (json.JSONDecodeError, ValueError):
+                continue
         return results
 
     def get_recent(self, limit: int = 10) -> list[ExplanationRecord]:
         results: list[ExplanationRecord] = []
-        if not self._explanations_path.exists():
-            return results
-        with open(self._explanations_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    results.append(ExplanationRecord(**json.loads(line)))
-                except (json.JSONDecodeError, ValueError):
-                    continue
+        for line in self._read_lines():
+            try:
+                results.append(ExplanationRecord(**json.loads(line)))
+            except (json.JSONDecodeError, ValueError):
+                continue
         return results[-limit:]

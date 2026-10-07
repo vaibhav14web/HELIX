@@ -140,6 +140,7 @@ class PermissionManager:
             alternatives=event.payload.get("alternatives"),
             source_module=event.payload.get("source_module", "unknown"),
             resources=event.payload.get("resources"),
+            request_id=event.payload.get("request_id") or event.payload.get("id"),
         )
 
     async def _handle_automation_permission_needed(self, event: HelixEvent) -> None:

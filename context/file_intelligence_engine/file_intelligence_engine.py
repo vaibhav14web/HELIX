@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import time
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,36 @@ class FileIntelligenceEngine:
         self._max_depth = int(os.getenv("HELIX_FILE_MAX_DEPTH", "4"))
         self._subscriptions: list[str] = []
         self._event_handler_map: dict[str, Any] = {}
+
+        allowed_env = os.getenv("HELIX_ALLOWED_READ_PATHS", "")
+        self._allowed_paths: list[Path] = [
+            Path.cwd().resolve(),
+            (Path.cwd() / "data").resolve(),
+            Path(tempfile.gettempdir()).resolve(),
+        ]
+        for p in self._watch_paths:
+            try:
+                self._allowed_paths.append(p.resolve())
+            except Exception:
+                pass
+        if allowed_env:
+            for p in allowed_env.split(";"):
+                if p.strip():
+                    try:
+                        self._allowed_paths.append(Path(p.strip()).resolve())
+                    except Exception:
+                        pass
+
+    def _is_path_allowed(self, path: str | Path) -> bool:
+        """Check if a target path is located within an allowlisted folder."""
+        try:
+            target = Path(path).resolve()
+            for allowed in self._allowed_paths:
+                if target == allowed or allowed in target.parents:
+                    return True
+        except Exception:
+            return False
+        return False
 
     async def start(self) -> None:
         self._event_handler_map = {
@@ -205,6 +236,8 @@ class FileIntelligenceEngine:
 
     def _get_file_info(self, path: str) -> dict[str, Any]:
         """Return metadata for a single file or directory."""
+        if not self._is_path_allowed(path):
+            return {"exists": False, "denied": True, "error": "Access denied: Path outside allowlist"}
         p = Path(path)
         if not p.exists():
             return {"exists": False}
@@ -226,6 +259,8 @@ class FileIntelligenceEngine:
 
     def _list_directory(self, path: str, max_depth: int) -> list[dict[str, Any]]:
         """List directory contents recursively up to max_depth."""
+        if not self._is_path_allowed(path):
+            return []
         root = Path(path)
         if not root.is_dir():
             return []
@@ -275,6 +310,8 @@ class FileIntelligenceEngine:
 
     def _get_recent_files(self, path: str, minutes: int) -> list[dict[str, Any]]:
         """Find files modified in the last N minutes."""
+        if not self._is_path_allowed(path):
+            return []
         root = Path(path)
         if not root.is_dir():
             return []
@@ -301,6 +338,8 @@ class FileIntelligenceEngine:
 
     def _detect_project_type(self, path: str) -> dict[str, Any]:
         """Detect project type(s) from marker files."""
+        if not self._is_path_allowed(path):
+            return {"project_types": [], "markers_found": [], "primary_type": "unknown", "denied": True}
         root = Path(path)
         if not root.is_dir():
             return {"project_types": [], "markers_found": []}

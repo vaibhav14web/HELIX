@@ -211,6 +211,8 @@ class BrowserEngine:
         The History file is locked while the browser is running, so we
         copy it to a temp file first (read-only, non-destructive).
         """
+        # Bounded history window: cap limit to max 50 entries
+        limit = min(max(1, limit), 50)
         # If user specified a custom profile path, use it
         if self._profile_path:
             history_path = Path(self._profile_path) / "History"
@@ -237,6 +239,7 @@ class BrowserEngine:
 
         Copies the database to avoid lock conflicts with the running browser.
         """
+        limit = min(max(1, limit), 50)
         entries: list[dict[str, Any]] = []
         tmp_path = None
         try:

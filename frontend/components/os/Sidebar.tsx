@@ -17,6 +17,8 @@ import {
   Settings,
   ChevronLeft,
   Zap,
+  Cpu,
+  Target,
 } from 'lucide-react'
 
 interface NavItem {
@@ -34,6 +36,8 @@ const navItems: NavItem[] = [
   { id: 'memory', label: 'Memory', icon: GitBranch, group: 'intelligence' },
   { id: 'agents', label: 'Agents', icon: Bot, group: 'intelligence', badge: '2' },
   { id: 'automation', label: 'Automation', icon: Workflow, group: 'intelligence' },
+  { id: 'goals', label: 'Goals', icon: Target, group: 'intelligence' },
+  { id: 'system', label: 'System', icon: Cpu, group: 'system' },
   { id: 'files', label: 'Files', icon: FolderOpen, group: 'system' },
   { id: 'browser', label: 'Browser', icon: Globe, group: 'system' },
   { id: 'insights', label: 'Insights', icon: BarChart3, group: 'intelligence' },

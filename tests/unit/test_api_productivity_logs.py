@@ -6,6 +6,11 @@ from pathlib import Path
 # Import the app
 from api.main import app
 import api.main
+from foundation.auth import get_or_create_auth_token
+
+def get_auth_headers():
+    token = get_or_create_auth_token()
+    return {"Authorization": f"Bearer {token}"}
 
 def test_get_productivity_patterns():
     # Mock productivity engine
@@ -29,7 +34,7 @@ def test_get_productivity_patterns():
     
     try:
         client = TestClient(app)
-        response = client.get("/productivity/patterns")
+        response = client.get("/productivity/patterns", headers=get_auth_headers())
         assert response.status_code == 200
         data = response.json()
         assert "patterns" in data
@@ -59,7 +64,7 @@ def test_get_productivity_suggestions():
     
     try:
         client = TestClient(app)
-        response = client.get("/productivity/suggestions?status=pending")
+        response = client.get("/productivity/suggestions?status=pending", headers=get_auth_headers())
         assert response.status_code == 200
         data = response.json()
         assert "suggestions" in data
@@ -90,7 +95,7 @@ async def test_get_logs(tmp_path):
     
     try:
         client = TestClient(app)
-        response = client.get("/logs?limit=10")
+        response = client.get("/logs?limit=10", headers=get_auth_headers())
         assert response.status_code == 200
         data = response.json()
         assert "logs" in data
@@ -103,7 +108,7 @@ async def test_get_logs(tmp_path):
         assert logs[1]["module"] == "helix.productivity_engine"
         
         # Test level filtering
-        response_filtered = client.get("/logs?level=INFO")
+        response_filtered = client.get("/logs?level=INFO", headers=get_auth_headers())
         assert response_filtered.status_code == 200
         filtered_logs = response_filtered.json()["logs"]
         assert len(filtered_logs) == 1

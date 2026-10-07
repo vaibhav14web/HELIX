@@ -5,26 +5,33 @@ import { Shield, AlertTriangle, Check, X, ShieldCheck } from 'lucide-react'
 import { usePermissions } from '@/lib/hooks/use-permissions'
 import { cn } from '@/lib/utils'
 
+import { useState } from 'react'
+
 export function PermissionModal() {
   const { pending, grant, deny, addAutoApprove } = usePermissions()
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set())
 
-  const activeRequest = pending.data?.pending?.[0]
+  const activeRequest = pending.data?.pending?.find((r) => !dismissedIds.has(r.id))
 
   if (!activeRequest) return null
 
   const handleGrant = () => {
+    setDismissedIds((prev) => new Set(prev).add(activeRequest.id))
     grant.mutate(activeRequest.id)
   }
 
   const handleDeny = () => {
+    setDismissedIds((prev) => new Set(prev).add(activeRequest.id))
     deny.mutate(activeRequest.id)
   }
 
   const handleAlwaysAllow = () => {
-    // Register the action as an auto-approve pattern
+    setDismissedIds((prev) => new Set(prev).add(activeRequest.id))
     addAutoApprove.mutate(activeRequest.action, {
       onSuccess: () => {
-        // Once registered, grant this request
+        grant.mutate(activeRequest.id)
+      },
+      onError: () => {
         grant.mutate(activeRequest.id)
       }
     })

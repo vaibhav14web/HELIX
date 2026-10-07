@@ -8,6 +8,9 @@ from pydantic import BaseModel
 from foundation.event_bus.event_bus import EventBus, HelixEvent
 
 
+from foundation.storage_manager.crypto import encrypt_string, decrypt_string
+
+
 class PreferenceEntry(BaseModel):
     key: str
     value: Any
@@ -44,23 +47,25 @@ class PreferenceMemory:
     def _load_from_disk(self) -> None:
         if self._preferences_path.exists():
             try:
-                with open(self._preferences_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if not isinstance(data, list):
-                        self._cache = {}
-                        return
-                    for entry_data in data:
-                        if not isinstance(entry_data, dict):
-                            continue
-                        entry = PreferenceEntry(**entry_data)
-                        self._cache[entry.key] = entry
-            except (json.JSONDecodeError, ValueError, TypeError):
+                raw_bytes = self._preferences_path.read_bytes()
+                decompressed = decrypt_string(raw_bytes)
+                data = json.loads(decompressed)
+                if not isinstance(data, list):
+                    self._cache = {}
+                    return
+                for entry_data in data:
+                    if not isinstance(entry_data, dict):
+                        continue
+                    entry = PreferenceEntry(**entry_data)
+                    self._cache[entry.key] = entry
+            except (json.JSONDecodeError, ValueError, TypeError, Exception):
                 self._cache = {}
 
     def _save_to_disk(self) -> None:
         self._preferences_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._preferences_path, "w", encoding="utf-8") as f:
-            json.dump([e.model_dump() for e in self._cache.values()], f, indent=2)
+        content = json.dumps([e.model_dump() for e in self._cache.values()], indent=2)
+        encrypted = encrypt_string(content)
+        self._preferences_path.write_bytes(encrypted)
         self._dirty = False
 
     async def _handle_store(self, event: HelixEvent) -> None:

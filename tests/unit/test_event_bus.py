@@ -87,3 +87,38 @@ async def test_event_defaults():
     assert event.priority == 1
     assert event.payload == {}
     assert event.correlation_id is not None
+
+
+@pytest.mark.asyncio
+async def test_fault_isolation_failing_handler():
+    bus = EventBus()
+    received_good = []
+    received_errors = []
+
+    async def failing_handler(event: HelixEvent):
+        raise ValueError("Deliberate handler failure")
+
+    async def good_handler(event: HelixEvent):
+        received_good.append(event)
+
+    async def error_listener(event: HelixEvent):
+        received_errors.append(event)
+
+    bus.subscribe("test.fault", failing_handler)
+    bus.subscribe("test.fault", good_handler)
+    bus.subscribe("module.error", error_listener)
+
+    # Publishing must not raise an exception even though failing_handler throws ValueError
+    event = HelixEvent(source="test", event_type="test.fault", payload={"data": 123})
+    await bus.publish(event)
+
+    # Verify good_handler executed successfully
+    assert len(received_good) == 1
+    assert received_good[0].payload["data"] == 123
+
+    # Verify module.error event was published
+    assert len(received_errors) == 1
+    assert received_errors[0].payload["original_event_type"] == "test.fault"
+    assert "Deliberate handler failure" in received_errors[0].payload["error"]
+    assert received_errors[0].payload["exception_type"] == "ValueError"
+

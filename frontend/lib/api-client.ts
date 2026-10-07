@@ -8,9 +8,14 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('helix_auth_token') : process.env.NEXT_PUBLIC_HELIX_AUTH_TOKEN
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(options?.headers as Record<string, string>) }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
   const url = `${API_BASE}${path}`
   const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers,
     ...options,
   })
   if (!res.ok) {
@@ -245,7 +250,10 @@ export const api = {
       const form = new FormData()
       form.append('file', file, 'audio.webm')
       form.append('session_id', session_id)
-      const res = await fetch(`${API_BASE}/voice/command`, { method: 'POST', body: form })
+      const token = typeof window !== 'undefined' ? localStorage.getItem('helix_auth_token') : process.env.NEXT_PUBLIC_HELIX_AUTH_TOKEN
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(`${API_BASE}/voice/command`, { method: 'POST', headers, body: form })
       if (!res.ok) throw new ApiError(res.status, await res.text())
       return res.json()
     },
@@ -253,7 +261,10 @@ export const api = {
       const form = new FormData()
       form.append('file', file, 'audio.webm')
       form.append('session_id', session_id)
-      const res = await fetch(`${API_BASE}/voice/transcribe`, { method: 'POST', body: form })
+      const token = typeof window !== 'undefined' ? localStorage.getItem('helix_auth_token') : process.env.NEXT_PUBLIC_HELIX_AUTH_TOKEN
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(`${API_BASE}/voice/transcribe`, { method: 'POST', headers, body: form })
       if (!res.ok) throw new ApiError(res.status, await res.text())
       return res.json()
     },
@@ -361,6 +372,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ suggestion_id }),
     }),
+    insights: () =>
+      request<{
+        focus_score: number
+        total_focus_hours: number
+        context_switches: number
+        categories: Array<{ name: string; percentage: number; hours: number; color: string }>
+        timeline: Array<{ time: string; score: number }>
+      }>('/productivity/insights'),
   },
 
   system: {
@@ -370,7 +389,52 @@ export const api = {
       request<{ logs: LogRecord[] }>(
         `/logs?limit=${limit}${level ? `&level=${encodeURIComponent(level)}` : ''}`
       ),
+    selfState: () => request<Record<string, unknown>>('/system/self_state'),
+    worldState: () => request<Record<string, unknown>>('/system/world_state'),
+    capabilities: () => request<{ capabilities: Array<{ id: string; name: string; description: string; supported_actions: string[]; risk_level: string; health: string }> }>('/system/capabilities'),
+    apps: () => request<{ apps: Array<{ name: string; executable_name: string; executable_path: string; source: string; aliases: string[] }> }>('/system/discovered_apps'),
+    projects: () => request<{ projects: Array<{ project_id: string; name: string; root_path: string; is_git_repo: boolean; languages: string[]; frameworks: string[] }> }>('/system/projects'),
+    traces: () => request<{ traces: Array<{ trace_id: string; component: string; action: string; duration_ms: number; status: string; timestamp: string }> }>('/system/traces'),
+  },
+
+  goals: {
+    get: () => request<{ goals: Array<{ goal_id: string; title: string; description: string; priority: string; progress_percent: number; status: string; tasks: Array<{ task_id: string; title: string; status: string }> }> }>('/goals'),
+    create: (data: { title: string; description: string; priority?: string }) =>
+      request<unknown>('/goals', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
 
   state: () => request<StateResponse>('/state'),
+}
+
+export interface SettingsStatePayload {
+  autoStart?: boolean
+  rememberHistory?: boolean
+  animations?: boolean
+  compactMode?: boolean
+  soundAlerts?: boolean
+  privateMode?: boolean
+  shortcutHints?: boolean
+  apiKeySaved?: boolean
+}
+
+export interface ReminderEntry {
+  id: string
+  text: string
+  timestamp?: number
+  time?: string
+  recurring?: boolean
+  triggered?: boolean
+  created_at?: number
+}
+
+export interface NoteItem {
+  title: string
+  filename: string
+  content: string
+  created_at: number
+  updated_at: number
+  size_bytes: number
 }

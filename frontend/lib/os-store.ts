@@ -13,6 +13,8 @@ export type NavSection =
   | 'automation'
   | 'logs'
   | 'insights'
+  | 'system'
+  | 'goals'
   | 'settings'
 
 interface OSState {

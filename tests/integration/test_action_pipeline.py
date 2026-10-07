@@ -15,7 +15,7 @@ def event_bus():
 
 
 @pytest.fixture
-async def pipeline(event_bus):
+async def pipeline(event_bus, tmp_path):
     os.environ["HELIX_LLM_BACKEND"] = "mock"
 
     import action.action_executor.action_executor as _ae
@@ -24,7 +24,9 @@ async def pipeline(event_bus):
     llm = LLMEngine(event_bus)
     conv = ConversationEngine(event_bus)
     planner = PlannerEngine(event_bus)
+    planner._state_path = str(tmp_path)
     automation = AutomationEngine(event_bus)
+    automation._state_path = str(tmp_path)
     executor = ActionExecutor(event_bus)
 
     await planner.start()

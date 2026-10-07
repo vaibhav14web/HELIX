@@ -534,30 +534,28 @@ Memory Agent
 
 ## LLM
 
-Primary:
+Orchestrator & General Conversation:
 
-Qwen3 1.7B Instruct
+Qwen3-4B-Q8_0.gguf
 
-Fallback:
+Coding & Programming Tasks:
 
-Qwen3 4B Instruct
+qwen2.5-coder-3b-instruct-q8_0.gguf
 
 Purpose:
 
-- Reasoning
-- Planning
-- Summarization
-- Response generation
+- Reasoning, planning, and general conversation (Qwen3-4B)
+- Code writing, refactoring, and debugging (qwen2.5-coder)
 
 Location:
 
-models/qwen3/
+C:\Users\vaibh\Documents\HELIX_MODELS\LLM\
 
 ---
 
 ## Embedding Model
 
-BAAI/bge-small-en-v1.5
+LFM2.5-Embedding-350M-Q8_0.gguf
 
 Purpose:
 
@@ -567,7 +565,7 @@ Purpose:
 
 Location:
 
-models/bge-small/
+C:\Users\vaibh\Documents\HELIX_MODELS\Embeddings\
 
 ---
 
@@ -587,7 +585,7 @@ models/faster-whisper/
 
 ## TTS
 
-Piper
+piper-zh_CN-huayan-medium-f16.gguf (Mandarin Chinese Voice)
 
 Purpose:
 
@@ -595,7 +593,7 @@ Purpose:
 
 Location:
 
-models/piper/
+C:\Users\vaibh\Documents\HELIX_MODELS\PIPER\
 
 ---
 

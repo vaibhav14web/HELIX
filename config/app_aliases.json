@@ -1,0 +1,21 @@
+{
+  "chrome": "chrome.exe",
+  "google chrome": "chrome.exe",
+  "edge": "msedge.exe",
+  "microsoft edge": "msedge.exe",
+  "firefox": "firefox.exe",
+  "notepad": "notepad.exe",
+  "calculator": "calc.exe",
+  "paint": "mspaint.exe",
+  "terminal": "wt.exe",
+  "explorer": "explorer.exe",
+  "file explorer": "explorer.exe",
+  "calc": "calc.exe",
+  "code": "code.cmd",
+  "vscode": "code.cmd",
+  "vs code": "code.cmd",
+  "wordpad": "wordpad.exe",
+  "vlc": "vlc.exe",
+  "spotify": "spotify.exe",
+  "discord": "discord.exe"
+}

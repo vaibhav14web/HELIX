@@ -113,7 +113,8 @@ async def test_has_correct_subscriptions(event_bus, engine):
 async def test_start_publishes_ready(event_bus, engine):
     conv, llm = engine
     assert conv._subscriptions is not None
-    assert len(conv._subscriptions) == 8
+    assert len(conv._subscriptions) == 10
+    assert "memory.warm.searched" in conv._subscriptions
 
 
 @pytest.mark.asyncio

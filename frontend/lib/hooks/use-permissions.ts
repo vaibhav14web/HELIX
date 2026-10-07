@@ -12,7 +12,7 @@ export function usePermissions() {
   const pending = useQuery({
     queryKey: ['permission-pending'],
     queryFn: api.permissions.pending,
-    refetchInterval: 5_000,
+    refetchInterval: 2_000,
   })
 
   const patterns = useQuery({

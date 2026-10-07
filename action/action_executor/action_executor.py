@@ -11,10 +11,53 @@ from pathlib import Path
 from typing import Any
 
 from foundation.event_bus.event_bus import EventBus, HelixEvent
+from action.application_discovery.app_discovery_engine import ApplicationDiscoveryEngine
+
+import json
+from html.parser import HTMLParser
 
 logger = logging.getLogger("helix.action_executor")
 
 _SEARCH_URL = os.getenv("HELIX_SEARCH_URL", "https://www.google.com/search?q={}")
+_DEFAULT_ALIASES_PATH = Path(__file__).resolve().parents[2] / "config" / "app_aliases.json"
+
+
+class HTMLArticleParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.text_chunks: list[str] = []
+        self._ignore_stack: list[str] = []
+        self._ignore_tags = {"script", "style", "noscript", "header", "footer", "nav", "svg", "head", "form"}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in self._ignore_tags:
+            self._ignore_stack.append(tag.lower())
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._ignore_stack and tag.lower() == self._ignore_stack[-1]:
+            self._ignore_stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        if not self._ignore_stack:
+            cleaned = data.strip()
+            if cleaned:
+                self.text_chunks.append(cleaned)
+
+
+def extract_article_text(html: str, max_chars: int = 2500) -> str:
+    try:
+        parser = HTMLArticleParser()
+        parser.feed(html)
+        full_text = " ".join(parser.text_chunks)
+        full_text = re.sub(r"\s+", " ", full_text).strip()
+        if len(full_text) > max_chars:
+            full_text = full_text[:max_chars] + "..."
+        return full_text
+    except Exception as e:
+        logger.debug("HTML article parsing error: %s", e)
+        clean = re.sub(r"<[^>]+>", " ", html)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return clean[:max_chars]
 
 _TRUSTED_SOURCES = {"automation_engine", "planner_engine", "orchestrator"}
 if os.getenv("HELIX_DEV_MODE", "").lower() in ("true", "1", "yes"):
@@ -28,8 +71,11 @@ _KNOWN_APPS: dict[str, str] = {
     "firefox": "firefox.exe",
     "notepad": "notepad.exe",
     "calculator": "calc.exe",
+    "calc": "calc.exe",
     "paint": "mspaint.exe",
+    "mspaint": "mspaint.exe",
     "terminal": "wt.exe",
+    "wt": "wt.exe",
     "explorer": "explorer.exe",
     "file explorer": "explorer.exe",
 }
@@ -78,6 +124,27 @@ class ActionExecutor:
         self._subscriptions: list[str] = []
         self._event_handler_map: dict[str, Any] = {}
         self._action_times: list[float] = []
+        self._app_aliases: dict[str, str] = dict(_KNOWN_APPS)
+        self._app_discovery = ApplicationDiscoveryEngine()
+        self.load_app_aliases()
+
+    def load_app_aliases(self, config_path: str | Path | None = None) -> None:
+        """Load or reload app aliases from a JSON file into self._app_aliases."""
+        path = Path(config_path) if config_path else Path(os.getenv("HELIX_APP_ALIASES_PATH", _DEFAULT_ALIASES_PATH))
+        if path.is_file():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    for alias, exe in data.items():
+                        if isinstance(alias, str) and isinstance(exe, str):
+                            self._app_aliases[alias.lower().strip()] = exe
+            except Exception as e:
+                logger.warning("Failed to load app aliases from %s: %s", path, e)
+
+    def register_alias(self, alias: str, executable: str) -> None:
+        """Register or override a user app alias at runtime."""
+        self._app_aliases[alias.lower().strip()] = executable
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -169,9 +236,31 @@ class ActionExecutor:
             return await self._executor(self._compose_email, params)
         if action == "open_url":
             return await self._executor(self._open_url, target, params)
+        if action == "read_browser_page":
+            return await self._read_browser_page(target, params)
+        if action == "in_app_task":
+            return await self._in_app_task(target, params)
+        if action == "vscode_open":
+            return await self._executor(self._vscode_open, target, params)
+        if action == "create_note":
+            return await self._executor(self._create_note, target, params)
+        if action == "scan_laptop_files":
+            return await self._executor(self._scan_laptop_files, params)
+        if action == "search_installed_apps":
+            return await self._executor(self._search_installed_apps, params)
+        if action == "search_projects":
+            return await self._executor(self._search_projects, params)
+        if action == "read_document":
+            return await self._executor(self._read_document, target, params)
+        if action == "edit_docx":
+            return await self._executor(self._edit_docx, target, params)
+        if action == "generate_pdf":
+            return await self._executor(self._generate_pdf, target, params)
         raise ValueError(f"Unknown action type: {action}")
 
     async def _executor(self, fn, *args) -> Any:
+        if getattr(self, "_loop", None) is None:
+            self._loop = asyncio.get_running_loop()
         return await asyncio.wait_for(
             self._loop.run_in_executor(None, fn, *args),
             timeout=_EXECUTOR_TIMEOUT,
@@ -188,12 +277,42 @@ class ActionExecutor:
 
     # ── Browser Search ──────────────────────────────────────────
 
+    def _verify_process_running(self, exe_name: str, max_wait_sec: float = 2.0) -> bool:
+        """Verify that process `exe_name` exists post-launch within max_wait_sec."""
+        if sys.platform != "win32":
+            return True
+
+        start_time = time.time()
+        exe_lower = exe_name.lower()
+        while time.time() - start_time <= max_wait_sec:
+            try:
+                res = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if exe_lower in res.stdout.lower():
+                    return True
+            except Exception as e:
+                logger.debug("Process verification check failed: %s", e)
+            time.sleep(0.3)
+        return False
+
+    # ── Browser Search ──────────────────────────────────────────
+
     def _browser_search(self, params: dict[str, Any]) -> dict[str, Any]:
         query = self._validate_string(params.get("query", ""), "query")
         if not query:
             raise ValueError("Search query is empty")
         url = _SEARCH_URL.format(urllib.parse.quote_plus(query))
-        return self._open_url_browser(url, action="browser_search")
+        res = self._open_url_browser(url, action="browser_search")
+        verified = any(
+            self._verify_process_running(b, max_wait_sec=1.0)
+            for b in ("chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe")
+        )
+        res["verified"] = verified
+        return res
 
     # ── Launch Application ──────────────────────────────────────
 
@@ -204,29 +323,55 @@ class ActionExecutor:
         app = self._validate_string(app, "application")
 
         app_lower = app.lower().strip()
-        executable = _KNOWN_APPS.get(app_lower)
+        executable = self._app_aliases.get(app_lower) or _KNOWN_APPS.get(app_lower)
         if not executable:
-            safe_list = ", ".join(sorted(_KNOWN_APPS))
-            raise ValueError(f"Unknown application: '{app}'. Allowed: {safe_list}")
+            if os.path.isfile(app):
+                executable = app
+            else:
+                safe_list = ", ".join(sorted(set(list(self._app_aliases.keys()) + list(_KNOWN_APPS.keys()))))
+                raise ValueError(f"Unknown application: '{app}'. Allowed: {safe_list}")
 
-        resolved = shutil.which(executable)
-        if not resolved:
-            fallback_paths = _KNOWN_APP_PATHS.get(executable, [])
-            for path in fallback_paths:
-                if os.path.isfile(path):
-                    resolved = path
-                    break
+        resolved = None
+        if os.path.isabs(executable) and os.path.isfile(executable):
+            resolved = executable
+        else:
+            resolved = shutil.which(executable)
+            if not resolved:
+                fallback_paths = _KNOWN_APP_PATHS.get(executable, [])
+                for path in fallback_paths:
+                    if os.path.isfile(path):
+                        resolved = path
+                        break
 
         if not resolved:
             raise FileNotFoundError(f"Application not found: {executable}. Make sure it is installed.")
 
+        url = params.get("url") or params.get("site") or params.get("target_site")
+        cmd = [resolved]
+        if url:
+            url = self._validate_string(url, "url")
+            self._validate_url(url)
+            cmd.append(url)
+
         try:
             subprocess.Popen(
-                [resolved],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            return {"status": "launched", "application": app}
+            verify_name = Path(executable).name
+            if verify_name.endswith(".cmd") or verify_name.endswith(".bat"):
+                verify_name = Path(executable).stem + ".exe"
+            verified = self._verify_process_running(verify_name)
+            if not verified:
+                logger.warning("Post-launch process check could not verify '%s'", verify_name)
+            return {
+                "status": "launched",
+                "application": app,
+                "executable": executable,
+                "verified": verified,
+                "url": url,
+            }
         except OSError as e:
             raise OSError(f"Failed to launch {app}: {e}")
 
@@ -251,23 +396,38 @@ class ActionExecutor:
                 raise PermissionError(f"Access denied: cannot open files under {blocked}")
 
         try:
-            if sys.platform == "win32":
-                os.startfile(str(path))
-            elif sys.platform == "darwin":
-                subprocess.Popen(
-                    ["open", str(path)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            else:
-                subprocess.Popen(
-                    ["xdg-open", str(path)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            return {"status": "opened", "path": str(path)}
+            if params.get("open_externally"):
+                if sys.platform == "win32":
+                    os.startfile(str(path))
+                elif sys.platform == "darwin":
+                    subprocess.Popen(
+                        ["open", str(path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    subprocess.Popen(
+                        ["xdg-open", str(path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                return {"status": "opened", "path": str(path)}
+
+            content = ""
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")[:4000]
+            except Exception as e:
+                content = f"[Could not read file text: {e}]"
+            return {
+                "status": "success",
+                "path": str(path),
+                "filename": path.name,
+                "content": content,
+                "size_bytes": path.stat().st_size,
+                "truncated": len(content) >= 4000,
+            }
         except OSError as e:
-            raise OSError(f"Failed to open {file_path}: {e}")
+            raise OSError(f"Failed to access {file_path}: {e}")
 
     # ── Send Notification ───────────────────────────────────────
 
@@ -381,6 +541,624 @@ class ActionExecutor:
     def _open_url_browser(self, url: str, action: str = "open_url") -> dict[str, Any]:
         self._validate_url(url)
         import webbrowser
-        webbrowser.open(url)
+        try:
+            if sys.platform == "win32":
+                os.startfile(url)
+            else:
+                webbrowser.open(url)
+        except Exception:
+            webbrowser.open(url)
         logger.info("Opened URL (%s): %s", action, url)
         return {"status": "opened", "url": url}
+
+    # ── Read Browser Page ──────────────────────────────────────
+
+    async def _read_browser_page(self, target: str | None, params: dict[str, Any]) -> dict[str, Any]:
+        raw_target = target or params.get("url") or params.get("page_url") or params.get("site", "")
+        raw_str = self._validate_string(str(raw_target), "url") if raw_target else ""
+
+        url = ""
+        raw_lower = raw_str.lower().strip()
+        if raw_str and raw_lower not in ("the page i have open", "current page", "open page", "active page"):
+            if not raw_str.startswith("http://") and not raw_str.startswith("https://"):
+                url = "https://" + raw_str
+            else:
+                url = raw_str
+            self._validate_url(url)
+
+        if not url:
+            from context.browser_engine.browser_engine import BrowserEngine
+            browser_eng = BrowserEngine(self._event_bus)
+            history = browser_eng._get_browser_history("", limit=1)
+            if history and history[0].get("url"):
+                url = history[0]["url"]
+            else:
+                tabs = browser_eng._get_active_tabs()
+                if tabs:
+                    url = tabs[0].get("title", "")
+
+        if not url:
+            raise ValueError("No URL or active browser page specified to read")
+
+        html_content = ""
+        if url.startswith("http://") or url.startswith("https://"):
+            import urllib.request
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) HELIX/1.0"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10.0) as resp:
+                    raw_data = resp.read(2_000_000)
+                    html_content = raw_data.decode("utf-8", errors="ignore")
+            except Exception as e:
+                logger.warning("Failed to fetch page from %s: %s", url, e)
+                html_content = f"<html><body><p>{url}</p></body></html>"
+        else:
+            html_content = f"<html><body><p>{url}</p></body></html>"
+
+        extracted_text = extract_article_text(html_content)
+        if not extracted_text:
+            extracted_text = f"Page content from {url}"
+
+        await self._event_bus.publish_event(
+            source="action_executor",
+            event_type="voice.tts",
+            payload={
+                "session_id": "read_browser_page",
+                "text": f"Reading page content: {extracted_text[:1500]}",
+            },
+        )
+
+        duration_est = round(len(extracted_text) / 15.0, 1)
+        return {
+            "status": "reading",
+            "url": url,
+            "text_length": len(extracted_text),
+            "text_sample": extracted_text[:200],
+            "duration_estimate_sec": duration_est,
+            "verified": True,
+        }
+
+    # ── In-App Tasks ───────────────────────────────────────────
+
+    async def _in_app_task(self, target: str | None, params: dict[str, Any]) -> dict[str, Any]:
+        app = (params.get("app") or target or "").lower().strip()
+        task_name = (params.get("task") or params.get("action_name") or "").lower().strip()
+
+        if app in ("vscode", "code", "vs code") or task_name in ("open_file", "open_folder", "vscode_open"):
+            return await self._executor(self._vscode_open, target, params)
+        if app in ("notes", "notepad", "note") or task_name == "create_note":
+            return await self._executor(self._create_note, target, params)
+
+        safe_apps = "vscode, notes"
+        raise ValueError(f"Unsupported in-app task application target: '{app}'. Supported: {safe_apps}")
+
+    def _vscode_open(self, target: str | None, params: dict[str, Any]) -> dict[str, Any]:
+        file_or_folder = target or params.get("path") or params.get("file") or params.get("folder", "")
+        if not file_or_folder:
+            raise ValueError("No file or folder path specified for VS Code")
+        file_or_folder = self._validate_string(file_or_folder, "path")
+
+        path_obj = Path(file_or_folder).resolve()
+        if not path_obj.exists():
+            raise FileNotFoundError(f"Target path does not exist: {file_or_folder}")
+
+        for blocked in _BLOCKED_PATH_PREFIXES:
+            if blocked in path_obj.parents or blocked == path_obj:
+                raise PermissionError(f"Access denied: cannot open files/folders under {blocked}")
+
+        if path_obj.is_file():
+            ext = path_obj.suffix.lower()
+            if ext in _BLOCKED_FILE_EXTENSIONS:
+                raise PermissionError(f"Access denied: cannot open {ext} files in VS Code")
+
+        code_exe = self._app_aliases.get("vscode") or self._app_aliases.get("code") or "code.cmd"
+        resolved = shutil.which(code_exe) or shutil.which("code.exe") or shutil.which("code.cmd")
+        if not resolved:
+            local_appdata = os.environ.get("LOCALAPPDATA", "")
+            program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+            possible_paths = [
+                os.path.join(local_appdata, "Programs", "Microsoft VS Code", "Code.exe"),
+                os.path.join(program_files, "Microsoft VS Code", "Code.exe"),
+                os.path.join(program_files, "Microsoft VS Code", "bin", "code.cmd"),
+            ]
+            for p in possible_paths:
+                if os.path.isfile(p):
+                    resolved = p
+                    break
+
+        if not resolved:
+            raise FileNotFoundError("VS Code executable ('code') not found on system.")
+
+        cmd = [resolved, str(path_obj)]
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            verified_proc = self._verify_process_running("Code.exe") or self._verify_process_running("code.exe")
+            verified_path = path_obj.exists()
+            verified = verified_proc and verified_path
+            if not verified:
+                logger.warning("Post-launch verification for VS Code opening '%s' could not verify process/path", path_obj)
+            return {
+                "status": "opened",
+                "app": "vscode",
+                "path": str(path_obj),
+                "executable": resolved,
+                "verified": verified,
+            }
+        except OSError as e:
+            raise OSError(f"Failed to open in VS Code: {e}")
+
+    def _create_note(self, target: str | None, params: dict[str, Any]) -> dict[str, Any]:
+        title = target or params.get("title") or params.get("name", "New_Note")
+        title = self._validate_string(title, "title")
+        content = params.get("content") or params.get("text", "")
+        content = self._validate_string(content, "content")
+
+        safe_title = re.sub(r'[^a-zA-Z0-9_\- ]', '_', title).strip()
+        if not safe_title:
+            safe_title = "Untitled_Note"
+
+        notes_dir = Path("./data/notes").resolve()
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        note_file = notes_dir / f"{safe_title}.txt"
+
+        note_file.write_text(content, encoding="utf-8")
+
+        cmd = ["notepad.exe", str(note_file)]
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            file_exists = note_file.is_file()
+            file_content_matches = note_file.read_text(encoding="utf-8") == content
+            proc_running = self._verify_process_running("notepad.exe")
+            verified = file_exists and file_content_matches and proc_running
+            return {
+                "status": "created",
+                "app": "notes",
+                "title": title,
+                "path": str(note_file),
+                "content_length": len(content),
+                "verified": verified,
+            }
+        except OSError as e:
+            raise OSError(f"Failed to create note: {e}")
+
+    # ── Laptop Apps & File Awareness ────────────────────────────
+
+    def _search_installed_apps(self, params: dict[str, Any]) -> dict[str, Any]:
+        query = (params.get("query") or "").strip().lower()
+        all_apps = self._app_discovery.list_apps()
+        matched = []
+        for app in all_apps:
+            name = app.get("name", "").lower()
+            exe = app.get("executable_name", "").lower()
+            aliases = [a.lower() for a in app.get("aliases", [])]
+            if not query or query in name or query in exe or any(query in a for a in aliases):
+                matched.append({
+                    "name": app.get("name"),
+                    "executable": app.get("executable_name"),
+                    "path": app.get("executable_path"),
+                    "source": app.get("source"),
+                })
+                if len(matched) >= 25:
+                    break
+        return {
+            "status": "success",
+            "query": query,
+            "count": len(matched),
+            "apps": matched,
+        }
+
+    def _scan_laptop_files(self, params: dict[str, Any]) -> dict[str, Any]:
+        folder_key = (params.get("folder") or "documents").strip().lower()
+        query = (params.get("query") or "").strip().lower()
+        max_results = min(int(params.get("max_results", 20)), 50)
+
+        user_profile = Path(os.environ.get("USERPROFILE", Path.home())).resolve()
+
+        # Resolve target directory (checking OneDrive equivalents if available)
+        if folder_key in ("documents", "doc", "docs"):
+            candidates = [
+                user_profile / "OneDrive" / "Documents",
+                user_profile / "Documents",
+            ]
+        elif folder_key in ("desktop", "desk"):
+            candidates = [
+                user_profile / "OneDrive" / "Desktop",
+                user_profile / "Desktop",
+            ]
+        elif folder_key in ("downloads", "down"):
+            candidates = [
+                user_profile / "Downloads",
+            ]
+        elif folder_key in ("home", "user", "root"):
+            candidates = [user_profile]
+        else:
+            candidates = [Path(folder_key).resolve()]
+
+        target_dir = None
+        for cand in candidates:
+            if cand.exists() and cand.is_dir():
+                target_dir = cand
+                break
+
+        if not target_dir:
+            return {
+                "status": "error",
+                "error": f"Directory '{folder_key}' could not be located on your laptop.",
+                "files": [],
+            }
+
+        # Sandboxing check
+        for blocked in _BLOCKED_PATH_PREFIXES:
+            if blocked in target_dir.parents or blocked == target_dir:
+                raise PermissionError(f"Access denied: cannot scan system path {blocked}")
+
+        skip_dirs = {
+            ".git", "node_modules", "__pycache__", "appdata", "$recycle.bin",
+            "system volume information", "windows", "programdata", ".venv", "venv",
+            ".pytest_cache", ".mypy_cache", ".next", ".nuxt"
+        }
+
+        results = []
+        try:
+            for root, dirs, files in os.walk(str(target_dir)):
+                # Prune unwanted directories
+                dirs[:] = [d for d in dirs if d.lower() not in skip_dirs and not d.startswith(".")]
+
+                for f in files:
+                    if f.startswith(".") or f.startswith("~$"):
+                        continue
+                    f_lower = f.lower()
+                    if query and (query not in f_lower):
+                        continue
+
+                    full_path = Path(root) / f
+                    ext = full_path.suffix.lower()
+                    if ext in _BLOCKED_FILE_EXTENSIONS:
+                        continue
+
+                    try:
+                        stat = full_path.stat()
+                        results.append({
+                            "filename": f,
+                            "path": str(full_path),
+                            "size_kb": round(stat.st_size / 1024, 1),
+                            "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+                        })
+                        if len(results) >= max_results:
+                            break
+                    except (OSError, PermissionError):
+                        continue
+
+                if len(results) >= max_results:
+                    break
+        except Exception as e:
+            logger.warning("Error scanning directory %s: %s", target_dir, e)
+
+        return {
+            "status": "success",
+            "target_directory": str(target_dir),
+            "query": query,
+            "count": len(results),
+            "files": results,
+        }
+
+    def _search_projects(self, params: dict[str, Any]) -> dict[str, Any]:
+        query = (params.get("query") or "").strip().lower()
+        user_profile = Path(os.environ.get("USERPROFILE", Path.home())).resolve()
+        search_dirs = [
+            user_profile / "OneDrive" / "Documents",
+            user_profile / "Documents",
+            user_profile / "Projects",
+            user_profile / "source" / "repos",
+            Path.cwd().resolve(),
+        ]
+        projects = []
+        seen_paths = set()
+
+        for s_dir in search_dirs:
+            if not s_dir.exists() or not s_dir.is_dir():
+                continue
+            try:
+                for item in s_dir.iterdir():
+                    if item.is_dir() and not item.name.startswith("."):
+                        if str(item) in seen_paths:
+                            continue
+                        if query and query not in item.name.lower():
+                            continue
+                        is_project = (
+                            (item / ".git").exists()
+                            or (item / "package.json").exists()
+                            or (item / "pyproject.toml").exists()
+                            or (item / "requirements.txt").exists()
+                        )
+                        if is_project or query:
+                            seen_paths.add(str(item))
+                            projects.append({
+                                "name": item.name,
+                                "path": str(item),
+                                "is_git": (item / ".git").exists(),
+                            })
+                            if len(projects) >= 20:
+                                break
+            except Exception:
+                continue
+            if len(projects) >= 20:
+                break
+
+        return {
+            "status": "success",
+            "query": query,
+            "count": len(projects),
+            "projects": projects,
+        }
+
+    # ── Document Handling (.docx, .pdf) ──────────────────────────
+
+    def _read_document(self, target: str | None, params: dict[str, Any]) -> dict[str, Any]:
+        file_path = target or params.get("path", "")
+        if not file_path:
+            raise ValueError("No document path specified")
+        file_path = self._validate_string(file_path, "path")
+
+        path = Path(file_path).resolve()
+
+        ext = path.suffix.lower()
+        if ext in _BLOCKED_FILE_EXTENSIONS:
+            raise PermissionError(f"Access denied: cannot open {ext} files")
+
+        for blocked in _BLOCKED_PATH_PREFIXES:
+            if blocked in path.parents or blocked == path:
+                raise PermissionError(f"Access denied: cannot open files under {blocked}")
+
+        if not path.exists():
+            raise FileNotFoundError(f"Document not found: {file_path}")
+
+        if ext == ".docx":
+            try:
+                import docx
+            except ImportError:
+                raise RuntimeError("python-docx is not installed in the environment.")
+
+            doc = docx.Document(str(path))
+            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+            tables_data = []
+            for table in doc.tables:
+                table_rows = []
+                for row in table.rows:
+                    table_rows.append([cell.text.strip() for cell in row.cells])
+                if table_rows:
+                    tables_data.append(table_rows)
+
+            full_text = "\n\n".join(paragraphs)
+            truncated = len(full_text) > 10000
+            return {
+                "status": "success",
+                "path": str(path),
+                "filename": path.name,
+                "format": "docx",
+                "paragraph_count": len(paragraphs),
+                "table_count": len(tables_data),
+                "content": full_text[:10000],
+                "truncated": truncated,
+                "tables": tables_data[:5],
+            }
+
+        elif ext == ".pdf":
+            try:
+                import pypdf
+            except ImportError:
+                raise RuntimeError("pypdf is not installed in the environment.")
+
+            reader = pypdf.PdfReader(str(path))
+            num_pages = len(reader.pages)
+            max_pages = int(params.get("max_pages", 20))
+            extracted_pages = []
+            for i, page in enumerate(reader.pages[:max_pages]):
+                page_text = page.extract_text() or ""
+                if page_text.strip():
+                    extracted_pages.append(f"--- Page {i+1} ---\n{page_text.strip()}")
+            full_text = "\n\n".join(extracted_pages)
+            truncated = len(full_text) > 10000 or num_pages > max_pages
+            return {
+                "status": "success",
+                "path": str(path),
+                "filename": path.name,
+                "format": "pdf",
+                "total_pages": num_pages,
+                "read_pages": min(num_pages, max_pages),
+                "content": full_text[:10000],
+                "truncated": truncated,
+            }
+
+        elif ext in {".txt", ".md", ".json", ".csv", ".py", ".html"}:
+            content = path.read_text(encoding="utf-8", errors="replace")[:10000]
+            return {
+                "status": "success",
+                "path": str(path),
+                "filename": path.name,
+                "format": ext.lstrip("."),
+                "content": content,
+                "truncated": path.stat().st_size > 10000,
+            }
+        else:
+            raise ValueError(f"Unsupported document format: {ext}. Supported formats are .docx, .pdf, .txt, .md")
+
+    def _edit_docx(self, target: str | None, params: dict[str, Any]) -> dict[str, Any]:
+        file_path = target or params.get("path", "")
+        if not file_path:
+            raise ValueError("No path specified for edit_docx")
+        file_path = self._validate_string(file_path, "path")
+
+        path = Path(file_path).resolve()
+        for blocked in _BLOCKED_PATH_PREFIXES:
+            if blocked in path.parents or blocked == path:
+                raise PermissionError(f"Access denied: cannot modify files under {blocked}")
+
+        if path.suffix.lower() != ".docx":
+            path = path.with_suffix(".docx")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import docx
+        except ImportError:
+            raise RuntimeError("python-docx is not installed in the environment.")
+
+        action = (params.get("action") or "append").lower().strip()
+        title = params.get("title")
+        content = params.get("content", "")
+        search_text = params.get("search_text", "")
+        replace_text = params.get("replace_text", "")
+
+        if action == "create":
+            doc = docx.Document()
+            if title:
+                doc.add_heading(str(title), level=0)
+            if content:
+                for block in str(content).split("\n\n"):
+                    if block.strip():
+                        doc.add_paragraph(block.strip())
+            doc.save(str(path))
+            return {
+                "status": "success",
+                "action": "create",
+                "path": str(path),
+                "filename": path.name,
+                "message": f"Created new Word document at {path.name}",
+            }
+
+        elif action == "append":
+            if path.exists():
+                doc = docx.Document(str(path))
+            else:
+                doc = docx.Document()
+            if title:
+                doc.add_heading(str(title), level=1)
+            if content:
+                for block in str(content).split("\n\n"):
+                    if block.strip():
+                        doc.add_paragraph(block.strip())
+            doc.save(str(path))
+            return {
+                "status": "success",
+                "action": "append",
+                "path": str(path),
+                "filename": path.name,
+                "message": f"Appended content to Word document {path.name}",
+            }
+
+        elif action == "replace_text":
+            if not path.exists():
+                raise FileNotFoundError(f"Cannot replace text; file does not exist: {path}")
+            if not search_text:
+                raise ValueError("search_text is required for action 'replace_text'")
+
+            doc = docx.Document(str(path))
+            replacements_made = 0
+
+            def _replace_in_paragraphs(paras):
+                nonlocal replacements_made
+                for p in paras:
+                    if search_text in p.text:
+                        replaced_in_run = False
+                        for run in p.runs:
+                            if search_text in run.text:
+                                run.text = run.text.replace(search_text, str(replace_text))
+                                replacements_made += 1
+                                replaced_in_run = True
+                        if not replaced_in_run and search_text in p.text:
+                            p.text = p.text.replace(search_text, str(replace_text))
+                            replacements_made += 1
+
+            _replace_in_paragraphs(doc.paragraphs)
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        _replace_in_paragraphs(cell.paragraphs)
+
+            doc.save(str(path))
+            return {
+                "status": "success",
+                "action": "replace_text",
+                "path": str(path),
+                "filename": path.name,
+                "replacements_made": replacements_made,
+                "message": f"Replaced {replacements_made} occurrence(s) of '{search_text}' in {path.name}",
+            }
+
+        else:
+            raise ValueError(f"Unknown action '{action}' for edit_docx. Must be 'create', 'append', or 'replace_text'.")
+
+    def _generate_pdf(self, target: str | None, params: dict[str, Any]) -> dict[str, Any]:
+        file_path = target or params.get("path", "")
+        if not file_path:
+            raise ValueError("No path specified for generate_pdf")
+        file_path = self._validate_string(file_path, "path")
+
+        path = Path(file_path).resolve()
+        for blocked in _BLOCKED_PATH_PREFIXES:
+            if blocked in path.parents or blocked == path:
+                raise PermissionError(f"Access denied: cannot write files under {blocked}")
+
+        if path.suffix.lower() != ".pdf":
+            path = path.with_suffix(".pdf")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        title = params.get("title", "")
+        content = params.get("content", "")
+        if not title and not content:
+            raise ValueError("Either 'title' or 'content' must be provided for generate_pdf")
+
+        try:
+            import html
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+            from reportlab.lib.styles import getSampleStyleSheet
+        except ImportError:
+            raise RuntimeError("reportlab is not installed in the environment.")
+
+        doc = SimpleDocTemplate(
+            str(path),
+            pagesize=letter,
+            rightMargin=54,
+            leftMargin=54,
+            topMargin=54,
+            bottomMargin=54,
+        )
+        styles = getSampleStyleSheet()
+        story = []
+
+        if title:
+            escaped_title = html.escape(str(title))
+            story.append(Paragraph(f"<b>{escaped_title}</b>", styles["Title"]))
+            story.append(Spacer(1, 14))
+
+        if content:
+            for block in str(content).split("\n\n"):
+                block = block.strip()
+                if block:
+                    escaped_block = html.escape(block).replace("\n", "<br/>")
+                    story.append(Paragraph(escaped_block, styles["BodyText"]))
+                    story.append(Spacer(1, 10))
+
+        doc.build(story)
+
+        return {
+            "status": "success",
+            "path": str(path),
+            "filename": path.name,
+            "title": str(title),
+            "size_bytes": path.stat().st_size,
+            "message": f"Successfully generated PDF document at {path.name}",
+        }

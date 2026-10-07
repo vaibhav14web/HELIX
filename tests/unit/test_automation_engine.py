@@ -10,8 +10,9 @@ def event_bus():
 
 
 @pytest.fixture
-def engine(event_bus):
+def engine(event_bus, tmp_path):
     e = AutomationEngine(event_bus)
+    e._state_path = str(tmp_path)
     return e
 
 

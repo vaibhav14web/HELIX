@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 from foundation.event_bus.event_bus import EventBus, HelixEvent
 
 
+from foundation.storage_manager.crypto import encrypt_string, decrypt_string
+
+
 class WorkSession(BaseModel):
     session_id: str
     active_project: str | None = None
@@ -54,23 +57,25 @@ class WorkMemory:
     def _load_from_disk(self) -> None:
         if self._work_path.exists():
             try:
-                with open(self._work_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if not isinstance(data, list):
-                        self._sessions = {}
-                        return
-                    for s in data:
-                        if not isinstance(s, dict):
-                            continue
-                        session = WorkSession(**s)
-                        self._sessions[session.session_id] = session
-            except (json.JSONDecodeError, ValueError, TypeError):
+                raw_bytes = self._work_path.read_bytes()
+                decompressed = decrypt_string(raw_bytes)
+                data = json.loads(decompressed)
+                if not isinstance(data, list):
+                    self._sessions = {}
+                    return
+                for s in data:
+                    if not isinstance(s, dict):
+                        continue
+                    session = WorkSession(**s)
+                    self._sessions[session.session_id] = session
+            except (json.JSONDecodeError, ValueError, TypeError, Exception):
                 self._sessions = {}
 
     def _save_to_disk(self) -> None:
         self._work_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._work_path, "w", encoding="utf-8") as f:
-            json.dump([s.model_dump() for s in self._sessions.values()], f, indent=2)
+        content = json.dumps([s.model_dump() for s in self._sessions.values()], indent=2)
+        encrypted = encrypt_string(content)
+        self._work_path.write_bytes(encrypted)
         self._dirty = False
 
     async def _handle_session_start(self, event: HelixEvent) -> None:

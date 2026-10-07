@@ -1,9 +1,12 @@
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Callable, Coroutine, Any
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("helix.event_bus")
 
 
 class HelixEvent(BaseModel):
@@ -33,12 +36,37 @@ class EventBus:
         if event_type in self._subscribers:
             self._subscribers[event_type] = [h for h in self._subscribers[event_type] if h is not handler]
 
+    async def _safe_invoke(self, handler: EventHandler, event: HelixEvent) -> None:
+        try:
+            res = handler(event)
+            if asyncio.iscoroutine(res) or asyncio.isfuture(res):
+                await res
+        except Exception as exc:
+            logger.exception(
+                "Error executing event handler %s for event '%s': %s",
+                getattr(handler, "__name__", str(handler)),
+                event.event_type,
+                exc,
+            )
+            if event.event_type != "module.error":
+                await self.publish_event(
+                    source="event_bus",
+                    event_type="module.error",
+                    payload={
+                        "handler": getattr(handler, "__name__", str(handler)),
+                        "original_event_type": event.event_type,
+                        "error": str(exc),
+                        "exception_type": exc.__class__.__name__,
+                    },
+                    correlation_id=event.correlation_id,
+                )
+
     async def publish(self, event: HelixEvent) -> None:
         handlers = self._subscribers.get(event.event_type, [])
         if not handlers:
             return
         sorted_handlers = sorted(handlers, key=lambda _: event.priority, reverse=True)
-        await asyncio.gather(*[handler(event) for handler in sorted_handlers], return_exceptions=True)
+        await asyncio.gather(*[self._safe_invoke(h, event) for h in sorted_handlers], return_exceptions=True)
 
     async def publish_event(self, source: str, event_type: str, payload: dict, priority: int = 1, correlation_id: str | None = None) -> HelixEvent:
         event = HelixEvent(
@@ -50,3 +78,4 @@ class EventBus:
         )
         await self.publish(event)
         return event
+
